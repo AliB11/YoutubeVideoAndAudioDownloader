@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/app_db
+      FILE_TTL_MINUTES: "120"
+      # YTDLP_COOKIES_FILE: /app/cookies.txt
+      # YTDLP_PROXY: socks5://host.docker.internal:1080
+    # volumes:
+    #   - ./cookies.txt:/app/cookies.txt:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
