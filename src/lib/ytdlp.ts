@@ -322,10 +322,37 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
 
 export const DOWNLOAD_ROOT = path.join(/* turbopackIgnore: true */ os.tmpdir(), "yt-downloader-jobs");
 
+/** فرایندهای yt-dlp در حال اجرا (برای امکان لغو دانلود) */
+const activeProcesses = new Map<string, ReturnType<typeof spawn>>();
+
+/**
+ * لغو یک دانلود در حال اجرا. اگر jobی با این شناسه در حال دانلود نباشد، false برمی‌گرداند.
+ * ابتدا SIGTERM می‌فرستد و اگر فرایند پس از چند ثانیه تمام نشد، SIGKILL.
+ */
+export function cancelDownload(jobId: string): boolean {
+  const child = activeProcesses.get(jobId);
+  if (!child || !child.pid) return false;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    /* ignore */
+  }
+  const timer = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+  timer.unref?.();
+  return true;
+}
+
 export interface DownloadHandlers {
   onProgress: (progress: number, status: "downloading" | "processing") => void;
   onDone: (filePath: string, fileSize: number) => void;
   onError: (message: string) => void;
+  onCancelled: () => void;
 }
 
 export interface DownloadRequest {
@@ -392,6 +419,7 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
   args.push(req.url);
 
   const child = spawn(/* turbopackIgnore: true */ bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  activeProcesses.set(req.jobId, child);
   let stderr = "";
   let lastProgress = 0;
   let downloadPhase = 0; // برای دانلودهای چندبخشی (ویدئو + صدا)
@@ -454,8 +482,20 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
     s.split(/\r?\n/).forEach(handleLine);
   });
 
-  child.on("error", (e) => handlers.onError(e.message));
-  child.on("close", async (code) => {
+  let signalReceived = false;
+  child.on("error", (e) => {
+    activeProcesses.delete(req.jobId);
+    handlers.onError(e.message);
+  });
+  child.on("close", async (code, signal) => {
+    activeProcesses.delete(req.jobId);
+    // اگر فرایند با سیگنال کشته شد یا پس از درخواست لغو با خطا متوقف شد، «لغو» ثبت می‌کنیم.
+    const cancelled = signal !== null || (signalReceived && code !== 0);
+    if (cancelled) {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+      handlers.onCancelled();
+      return;
+    }
     if (code !== 0) {
       handlers.onError(cleanError(stderr) || `yt-dlp exited with code ${code}`);
       return;
@@ -476,6 +516,13 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
       handlers.onError(e instanceof Error ? e.message : String(e));
     }
   });
+
+  // «لغو» را با نشانه‌گذاری پیگیری می‌کنیم تا از گزارش خطا جلوگیری شود.
+  const originalKill = child.kill.bind(child);
+  child.kill = (sig?: NodeJS.Signals | number) => {
+    signalReceived = true;
+    return originalKill(sig);
+  };
 
   return child;
 }

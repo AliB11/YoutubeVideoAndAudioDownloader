@@ -53,7 +53,9 @@ export default function Downloader() {
 
   /* ------------------------------ polling jobها ------------------------------ */
   useEffect(() => {
-    const pending = activeJobs.filter((j) => j.status !== "done" && j.status !== "error");
+    const pending = activeJobs.filter(
+      (j) => j.status !== "done" && j.status !== "error" && j.status !== "cancelled",
+    );
     if (pending.length === 0) return;
 
     const timer = setInterval(async () => {
@@ -180,8 +182,34 @@ export default function Downloader() {
         info &&
         j.title === info.title &&
         j.status !== "done" &&
-        j.status !== "error",
+        j.status !== "error" &&
+        j.status !== "cancelled",
     );
+
+  /* ------------------------------ لغو و حذف job ------------------------------ */
+  const cancelJob = async (jobId: string) => {
+    setActiveJobs((prev) =>
+      prev.map((j) => (j.jobId === jobId ? { ...j, status: "cancelled" as const, progress: 0 } : j)),
+    );
+    try {
+      await fetch(`/api/jobs/${jobId}?cancel=1`, { method: "DELETE" });
+    } catch {
+      /* polling یا بازخوانی تاریخچه وضعیت واقعی را همگام می‌کند */
+    }
+    void loadHistory();
+  };
+
+  const deleteJob = async (jobId: string) => {
+    // بازخورد فوری در UI؛ در صورت خطا polling/تاریخچه آن را برمی‌گرداند
+    setActiveJobs((prev) => prev.filter((j) => j.jobId !== jobId));
+    setHistory((prev) => prev.filter((j) => j.jobId !== jobId));
+    try {
+      await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+    } catch {
+      /* ignore */
+    }
+    void loadHistory();
+  };
 
   return (
     <div className="space-y-6">
@@ -370,7 +398,7 @@ export default function Downloader() {
           </h3>
           <ul className="space-y-3">
             {activeJobs.map((j) => (
-              <JobRow key={j.jobId} job={j} />
+              <JobRow key={j.jobId} job={j} onCancel={cancelJob} onDelete={deleteJob} />
             ))}
           </ul>
         </section>
@@ -399,7 +427,7 @@ export default function Downloader() {
         ) : (
           <ul className="divide-y divide-white/5">
             {history.map((j) => (
-              <HistoryRow key={j.jobId} job={j} />
+              <HistoryRow key={j.jobId} job={j} onDelete={deleteJob} />
             ))}
           </ul>
         )}
@@ -591,6 +619,8 @@ function statusLabel(j: PublicJob) {
       return "آماده دانلود";
     case "error":
       return "خطا";
+    case "cancelled":
+      return "لغو شده";
     case "expired":
       return "منقضی شده";
     default:
@@ -598,7 +628,15 @@ function statusLabel(j: PublicJob) {
   }
 }
 
-function JobRow({ job }: { job: PublicJob }) {
+function JobRow({
+  job,
+  onCancel,
+  onDelete,
+}: {
+  job: PublicJob;
+  onCancel: (jobId: string) => void;
+  onDelete: (jobId: string) => void;
+}) {
   const running = job.status === "downloading" || job.status === "processing";
   const accent = job.kind === "video" ? "bg-red-500" : "bg-emerald-500";
   return (
@@ -619,6 +657,9 @@ function JobRow({ job }: { job: PublicJob }) {
           {job.status === "error" && (
             <p className="mt-1 text-xs text-red-300">{job.error}</p>
           )}
+          {job.status === "cancelled" && (
+            <p className="mt-1 text-xs text-slate-500">دانلود توسط شما لغو شد.</p>
+          )}
           {running && (
             <div className="mt-2 flex items-center gap-2">
               <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
@@ -635,23 +676,44 @@ function JobRow({ job }: { job: PublicJob }) {
             </div>
           )}
         </div>
-        {job.status === "done" && job.downloadUrl && (
-          <a
-            href={job.downloadUrl}
-            className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
+        <div className="flex shrink-0 items-center gap-2">
+          {running && (
+            <button
+              type="button"
+              onClick={() => onCancel(job.jobId)}
+              className="inline-flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition hover:bg-amber-500/20"
+            >
+              <IconX className="h-3.5 w-3.5" />
+              لغو
+            </button>
+          )}
+          {job.status === "done" && job.downloadUrl && (
+            <a
+              href={job.downloadUrl}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
+            >
+              <IconDownload className="h-3.5 w-3.5" />
+              ذخیره فایل
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={() => onDelete(job.jobId)}
+            title="حذف از فهرست"
+            aria-label="حذف از فهرست"
+            className="rounded-lg p-2 text-slate-500 transition hover:bg-white/5 hover:text-red-400"
           >
-            <IconDownload className="h-3.5 w-3.5" />
-            ذخیره فایل
-          </a>
-        )}
+            <IconTrash className="h-4 w-4" />
+          </button>
+        </div>
       </div>
     </li>
   );
 }
 
-function HistoryRow({ job }: { job: PublicJob }) {
+function HistoryRow({ job, onDelete }: { job: PublicJob; onDelete: (jobId: string) => void }) {
   return (
-    <li className="flex items-center gap-3 py-2.5">
+    <li className="group flex items-center gap-3 py-2.5">
       <div className="relative h-9 w-14 shrink-0 overflow-hidden rounded-md bg-slate-800">
         {job.thumbnail ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -680,9 +742,20 @@ function HistoryRow({ job }: { job: PublicJob }) {
         <span className="text-xs text-red-400">ناموفق</span>
       ) : job.status === "expired" ? (
         <span className="text-xs text-slate-500">حذف شده</span>
+      ) : job.status === "cancelled" ? (
+        <span className="text-xs text-slate-500">لغو شده</span>
       ) : (
         <span className="text-xs text-amber-300 tabular">{job.progress}%</span>
       )}
+      <button
+        type="button"
+        onClick={() => onDelete(job.jobId)}
+        title="حذف از تاریخچه"
+        aria-label="حذف از تاریخچه"
+        className="rounded-lg p-1.5 text-slate-600 opacity-0 transition hover:bg-white/5 hover:text-red-400 group-hover:opacity-100"
+      >
+        <IconTrash className="h-4 w-4" />
+      </button>
     </li>
   );
 }
@@ -955,6 +1028,26 @@ function IconClock({ className = "h-4 w-4" }: { className?: string }) {
     >
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function IconTrash({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M10 11v6M14 11v6" />
     </svg>
   );
 }

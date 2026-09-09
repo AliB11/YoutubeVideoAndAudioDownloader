@@ -25,7 +25,7 @@ export const downloads = pgTable("downloads", {
   kind: varchar("kind", { length: 16 }).notNull(),
   // e.g. "1080p" or "320kbps"
   quality: varchar("quality", { length: 32 }).notNull(),
-  // "pending" | "downloading" | "processing" | "done" | "error"
+  // "pending" | "downloading" | "processing" | "done" | "error" | "cancelled" | "expired"
   status: varchar("status", { length: 16 }).notNull().default("pending"),
   progress: integer("progress").notNull().default(0),
   fileName: text("file_name"),

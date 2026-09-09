@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { db, isDbConfigured } from "@/db";
 import { downloads, type Download } from "@/db/schema";
-import { removeJobDir, runDownload, sanitizeFileName, type VideoInfo } from "@/lib/ytdlp";
+import {
+  cancelDownload,
+  removeJobDir,
+  runDownload,
+  sanitizeFileName,
+  type VideoInfo,
+} from "@/lib/ytdlp";
 
 /** مدت نگهداری فایل‌های دانلودشده روی سرور (میلی‌ثانیه) */
 const FILE_TTL_MS = Number(process.env.FILE_TTL_MINUTES ?? 120) * 60 * 1000;
@@ -50,7 +56,8 @@ export async function cleanupExpired() {
 
   // پاک‌سازی رکوردهای داخل حافظه (فایل + وضعیت)
   for (const [jobId, job] of memJobs) {
-    const finished = job.status === "done" || job.status === "error";
+    const finished =
+      job.status === "done" || job.status === "error" || job.status === "cancelled";
     if (finished && job.createdAt.getTime() < cutoffMs) {
       await removeJobDir(jobId);
       memJobs.delete(jobId);
@@ -64,7 +71,12 @@ export async function cleanupExpired() {
     const expired = await db
       .select({ id: downloads.id, jobId: downloads.jobId })
       .from(downloads)
-      .where(and(lt(downloads.createdAt, cutoff), inArray(downloads.status, ["done", "error"])));
+      .where(
+        and(
+          lt(downloads.createdAt, cutoff),
+          inArray(downloads.status, ["done", "error", "cancelled"]),
+        ),
+      );
 
     for (const row of expired) {
       await removeJobDir(row.jobId);
@@ -192,6 +204,14 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
         liveJobs.set(jobId, { progress: 0, status: "error", lastDbWrite: Date.now() });
         void persist(jobId, { status: "error", error: message, completedAt: new Date() });
       },
+      onCancelled: () => {
+        liveJobs.set(jobId, { progress: 0, status: "cancelled", lastDbWrite: Date.now() });
+        void persist(jobId, {
+          status: "cancelled",
+          error: null,
+          completedAt: new Date(),
+        });
+      },
     },
   ).catch((e) => {
     const message = e instanceof Error ? e.message : String(e);
@@ -221,6 +241,46 @@ export async function getJob(jobId: string): Promise<Download | null> {
     warnOnce("get", `[jobs] db select failed: ${e instanceof Error ? e.message : e}`);
     return null;
   }
+}
+
+/**
+ * لغو یک دانلودِ در حال اجرا. تنها jobهایی که هنوز در حال دانلود/پردازش هستند
+ * قابل لغو هستند. خروجی مقدار خطا (به‌فارسی) یا null در صورت موفقیت است.
+ */
+export async function cancelJob(jobId: string): Promise<string | null> {
+  const job = await getJob(jobId);
+  if (!job) return "دانلود پیدا نشد";
+  if (job.status === "done") return "دانلود تمام شده و قابل لغو نیست";
+  if (job.status === "error") return "این دانلود قبلاً با خطا متوقف شده است";
+  if (job.status === "cancelled") return "این دانلود قبلاً لغو شده است";
+  if (job.status === "expired") return "این دانلود منقضی شده است";
+
+  // اگر فرایند فعالی وجود داشت، آن را متوقف می‌کنیم (تکمیل لغو توسط onCancelled انجام می‌شود)
+  cancelDownload(jobId);
+  liveJobs.set(jobId, { progress: 0, status: "cancelled", lastDbWrite: Date.now() });
+  await persist(jobId, { status: "cancelled", error: null, completedAt: new Date() });
+  await removeJobDir(jobId);
+  return null;
+}
+
+/** حذف کامل یک دانلود از تاریخچه و پاک‌کردن فایل‌های آن */
+export async function deleteJob(jobId: string): Promise<boolean> {
+  const job = await getJob(jobId);
+  if (!job) return false;
+
+  cancelDownload(jobId);
+  liveJobs.delete(jobId);
+  memJobs.delete(jobId);
+  await removeJobDir(jobId);
+
+  if (isDbConfigured) {
+    try {
+      await db.delete(downloads).where(eq(downloads.jobId, jobId));
+    } catch (e) {
+      warnOnce("delete", `[jobs] db delete failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return true;
 }
 
 /** فهرست آخرین دانلودها (تاریخچه) — از دیتابیس یا در نبود آن از حافظه */
