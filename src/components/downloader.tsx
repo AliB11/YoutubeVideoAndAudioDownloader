@@ -2,28 +2,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import Link from "next/link";
 import type { AudioQuality, VideoInfo, VideoQuality } from "@/lib/ytdlp";
 import type { PublicJob } from "@/lib/jobs";
 import { faNum, formatBytes, formatDuration, formatRelative, formatViews } from "@/lib/format";
+import { demoActiveJobs, demoHistory, demoInfo } from "@/lib/demo";
 
 type Tab = "video" | "audio";
 
 const YT_REGEX =
   /^(https?:\/\/)?((www|m|music)\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)\/.+/i;
 
-export default function Downloader() {
+export default function Downloader({ demo = false }: { demo?: boolean }) {
   const [tab, setTab] = useState<Tab>("video");
   const [url, setUrl] = useState("");
   const [loadingInfo, setLoadingInfo] = useState(false);
-  const [info, setInfo] = useState<VideoInfo | null>(null);
+  const [info, setInfo] = useState<VideoInfo | null>(demo ? demoInfo : null);
   const [infoError, setInfoError] = useState<string | null>(null);
 
-  const [activeJobs, setActiveJobs] = useState<PublicJob[]>([]);
-  const [history, setHistory] = useState<PublicJob[]>([]);
+  const [activeJobs, setActiveJobs] = useState<PublicJob[]>(demo ? demoActiveJobs : []);
+  const [history, setHistory] = useState<PublicJob[]>(demo ? demoHistory : []);
   const autoDownloaded = useRef<Set<string>>(new Set());
 
   /* ---------------------------- تاریخچه دانلودها ---------------------------- */
   const loadHistory = useCallback(async () => {
+    if (demo) return;
     try {
       const res = await fetch("/api/jobs", { cache: "no-store" });
       if (!res.ok) return;
@@ -32,9 +35,10 @@ export default function Downloader() {
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [demo]);
 
   useEffect(() => {
+    if (demo) return;
     let cancelled = false;
     (async () => {
       try {
@@ -49,10 +53,11 @@ export default function Downloader() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [demo]);
 
   /* ------------------------------ polling jobها ------------------------------ */
   useEffect(() => {
+    if (demo) return;
     const pending = activeJobs.filter(
       (j) => j.status !== "done" && j.status !== "error" && j.status !== "cancelled",
     );
@@ -92,7 +97,7 @@ export default function Downloader() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [activeJobs, loadHistory]);
+  }, [activeJobs, loadHistory, demo]);
 
   /* ------------------------------ دریافت اطلاعات ------------------------------ */
   const fetchInfo = async (e?: FormEvent) => {
@@ -191,6 +196,7 @@ export default function Downloader() {
     setActiveJobs((prev) =>
       prev.map((j) => (j.jobId === jobId ? { ...j, status: "cancelled" as const, progress: 0 } : j)),
     );
+    if (demo) return;
     try {
       await fetch(`/api/jobs/${jobId}?cancel=1`, { method: "DELETE" });
     } catch {
@@ -203,6 +209,7 @@ export default function Downloader() {
     // بازخورد فوری در UI؛ در صورت خطا polling/تاریخچه آن را برمی‌گرداند
     setActiveJobs((prev) => prev.filter((j) => j.jobId !== jobId));
     setHistory((prev) => prev.filter((j) => j.jobId !== jobId));
+    if (demo) return;
     try {
       await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
     } catch {
@@ -213,6 +220,18 @@ export default function Downloader() {
 
   return (
     <div className="space-y-6">
+      {demo && (
+        <div className="flex flex-col items-start justify-between gap-2 rounded-2xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-200 sm:flex-row sm:items-center">
+          <span className="flex items-center gap-2">
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-sky-500/20 text-xs">🎨</span>
+            حالت پیش‌نمایش — همه‌ی داده‌ها نمایشی هستند و دکمه‌ها فقط برای دیدن طراحی فعال‌اند.
+          </span>
+          <Link href="/" className="shrink-0 rounded-lg border border-sky-500/30 px-3 py-1.5 text-xs font-semibold transition hover:bg-sky-500/10">
+            بازگشت به اپلیکیشن
+          </Link>
+        </div>
+      )}
+
       {/* ------------------------------- تب‌ها ------------------------------- */}
       <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-900/70 p-1.5 ring-1 ring-white/10 backdrop-blur">
         <TabButton active={tab === "video"} onClick={() => setTab("video")} icon={<IconFilm />}>
