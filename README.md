@@ -2,6 +2,8 @@
 
 وب‌اپلیکیشن دانلود ویدئو و MP3 از یوتیوب — ساخته‌شده با **Next.js 16 (App Router)**، **PostgreSQL + Drizzle ORM**، **yt-dlp** و **ffmpeg**.
 
+[![CI](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/actions/workflows/ci.yml/badge.svg)](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/actions/workflows/ci.yml)
+
 ## ✨ امکانات
 
 | بخش | توضیح |
@@ -54,9 +56,17 @@ npm run start
 
 ---
 
-## ⚙️ متغیرهای محیطی
+## ☁️ استقرار (Deploy)
 
-| متغیر | پیش‌فرض | توضیح |
+اپلیکیشن به یک **سرور** نیاز دارد (اجرای yt-dlp/ffmpeg در پس‌زمینه)، پس روی هاست استاتیک اجرا نمی‌شود. هر کدام از این‌ها کار می‌کند:
+
+- **هر VPS / سرور مجازی با داکر:** `git clone` + `docker compose up -d --build` (ساده‌ترین).
+- **Railway / Render / Fly.io:** سرویس «Dockerfile» بسازید و `DATABASE_URL` را ست کنید (PostgreSQL داخلی همین پلتفرم‌ها کافی است).
+- **بدون دیتابیس هم بالا می‌آید:** فقط تاریخچه ذخیره نمی‌شود.
+
+> برای استقرار عمومی، حتماً یک لایهٔ احراز هویت/محدودیت نرخ اضافه کنید (فعلاً پروژه برای استفادهٔ شخصی طراحی شده است).
+
+## ⚙️ متغیرهای محیطی| متغیر | پیش‌فرض | توضیح |
 |---|---|---|
 | `DATABASE_URL` | — | رشته اتصال PostgreSQL (الزامی) |
 | `YTDLP_PATH` | دانلود خودکار | مسیر باینری yt-dlp |
@@ -79,20 +89,25 @@ npm run start
 src/
 ├─ app/
 │  ├─ page.tsx                     # صفحه اصلی
-│  ├─ layout.tsx                   # RTL + فونت فارسی
+│  ├─ layout.tsx                   # RTL + فونت فارسی (self-host)
+│  ├─ preview/page.tsx             # پیش‌نمایش طراحی با دادهٔ نمایشی
 │  └─ api/
 │     ├─ info/route.ts             # POST  دریافت اطلاعات و کیفیت‌های ویدئو
 │     ├─ jobs/route.ts             # GET تاریخچه | POST ایجاد job دانلود
 │     ├─ jobs/[jobId]/route.ts     # GET وضعیت/پیشرفت job | DELETE حذف یا لغو (?cancel=1)
 │     └─ jobs/[jobId]/file/route.ts# GET استریم فایل نهایی (با Range)
-├─ components/downloader.tsx       # رابط کاربری (تب ویدئو / MP3)
+├─ components/
+│  ├─ downloader.tsx               # رابط کاربری (تب ویدئو / MP3، لغو، حذف)
+│  └─ hero.tsx                     # سربرگ صفحه
 ├─ lib/
-│  ├─ ytdlp.ts                     # مدیریت باینری، parse فرمت‌ها، اجرای دانلود
+│  ├─ ytdlp.ts                     # مدیریت باینری، parse فرمت‌ها، اجرا/لغو دانلود
 │  ├─ jobs.ts                      # مدیریت jobها + ذخیره در DB + پاک‌سازی
+│  ├─ demo.ts                      # دادهٔ نمایشی برای حالت پیش‌نمایش
 │  └─ format.ts                    # توابع فرمت‌بندی
 └─ db/
    ├─ schema.ts                    # جدول downloads
    └─ index.ts                     # کلاینت Drizzle
+drizzle.config.ts                  # پیکربندی drizzle-kit (خواندن DATABASE_URL از env)
 ```
 
 ### جریان کار
@@ -104,20 +119,15 @@ src/
 
 ---
 
-## 📤 قرار دادن روی GitHub
+## 🤖 CI (بررسی خودکار روی GitHub)
+
+فایل `.github/workflows/ci.yml` روی هر push و pull request، مراحل **lint → typecheck → build** را اجرا می‌کند تا مطمئن شویم پروژه همیشه قابل build است. برای اجرای محلی همین بررسی‌ها:
 
 ```bash
-# 1) در GitHub یک ریپوی خالی بسازید (مثلاً youtube-downloader)
-# 2) در پوشه پروژه:
-git init
-git add .
-git commit -m "feat: YouTube video & MP3 downloader (Next.js + yt-dlp + PostgreSQL)"
-git branch -M main
-git remote add origin https://github.com/<USERNAME>/youtube-downloader.git
-git push -u origin main
+npm run lint
+npm run typecheck
+npm run build
 ```
-
-> نکته: فایل `.env`, پوشه `.bin/` و `node_modules/` در `.gitignore` هستند و روی گیت‌هاب نمی‌روند.
 
 ## 📄 لایسنس
 MIT
