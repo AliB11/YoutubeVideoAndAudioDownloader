@@ -12,7 +12,8 @@
 | 🗂 **تاریخچه** | تمام دانلودها در PostgreSQL ذخیره می‌شوند و تا زمان انقضا قابل دانلود مجدد هستند. |
 | ⬇ **دانلود قابل ادامه** | پشتیبانی از `Range` (Resume در دانلود منیجرها). |
 | 🧹 **پاک‌سازی خودکار** | فایل‌های موقت پس از مدت مشخص (پیش‌فرض ۲ ساعت) از سرور حذف می‌شوند. |
-| 🌐 **فارسی و RTL** | رابط کاربری کاملاً فارسی با فونت وزیرمتن. |
+| 🌐 **فارسی و RTL** | رابط کاربری کاملاً فارسی با فونت وزیرمتن (به‌صورت self-host، بدون وابستگی به گوگل‌فونت). |
+| 🔌 **بدون دیتابیس هم کار می‌کند** | اگر `DATABASE_URL` تنظیم نشود، دانلود و تبدیل همچنان فعال است؛ فقط تاریخچه ذخیره نمی‌شود. |
 
 > ⚠️ این ابزار برای دانلود محتوایی است که حق استفاده از آن را دارید (ویدئوهای خودتان، محتوای با مجوز Creative Commons و…). لطفاً به حقوق پدیدآورندگان و قوانین یوتیوب احترام بگذارید.
 
@@ -21,8 +22,8 @@
 ## 🚀 اجرا با Docker (پیشنهادی)
 
 ```bash
-git clone https://github.com/<USERNAME>/youtube-downloader.git
-cd youtube-downloader
+git clone https://github.com/AliB11/YoutubeVideoAndAudioDownloader.git
+cd YoutubeVideoAndAudioDownloader
 docker compose up -d --build
 ```
 
@@ -30,17 +31,18 @@ docker compose up -d --build
 
 ## 🛠 اجرای محلی (بدون Docker)
 
-پیش‌نیاز: Node.js 20+ و PostgreSQL
+پیش‌نیاز: Node.js 20+ (PostgreSQL اختیاری است — فقط برای تاریخچه)
 
 ```bash
-cp .env.example .env         # DATABASE_URL را تنظیم کنید
+cp .env.example .env         # DATABASE_URL را تنظیم کنید (اختیاری)
 npm install
-npx drizzle-kit push         # ساخت جدول‌ها
+npx drizzle-kit push         # ساخت جدول‌ها (فقط اگر دیتابیس دارید)
 npm run dev                  # http://localhost:3000
 ```
 
-- **yt-dlp**: در اولین درخواست به‌صورت خودکار از GitHub دانلود و در پوشه `.bin/` ذخیره می‌شود (یا `YTDLP_PATH` را تنظیم کنید).
+- **yt-dlp**: در اولین درخواست به‌صورت خودکار از ریلیز رسمی GitHub دانلود و در پوشه `.bin/` ذخیره می‌شود (یا `YTDLP_PATH` را تنظیم کنید).
 - **ffmpeg**: از پکیج `ffmpeg-static` استفاده می‌شود (یا `FFMPEG_PATH` را تنظیم کنید).
+- بدون `DATABASE_URL` نیز اپلیکیشن کار می‌کند؛ فقط بخش «تاریخچه» غیرفعال است.
 
 ### بیلد production
 

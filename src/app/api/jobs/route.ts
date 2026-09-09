@@ -1,8 +1,5 @@
 import { NextRequest } from "next/server";
-import { desc } from "drizzle-orm";
-import { db } from "@/db";
-import { downloads } from "@/db/schema";
-import { createJob, toPublicJob } from "@/lib/jobs";
+import { createJob, listJobs, toPublicJob } from "@/lib/jobs";
 import { isValidYoutubeUrl } from "@/lib/ytdlp";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +8,7 @@ const ALLOWED_AUDIO = [320, 256, 192, 160, 128, 96, 64];
 
 /** لیست آخرین دانلودها (تاریخچه) */
 export async function GET() {
-  const rows = await db.select().from(downloads).orderBy(desc(downloads.createdAt)).limit(30);
+  const rows = await listJobs(30);
   return Response.json({ jobs: rows.map(toPublicJob) });
 }
 

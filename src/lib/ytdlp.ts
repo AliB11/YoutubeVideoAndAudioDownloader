@@ -1,23 +1,28 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
+import fs, { createWriteStream } from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import YTDlpWrap from "yt-dlp-wrap";
+import { Readable, pipeline } from "node:stream";
+import { promisify } from "node:util";
 import ffmpegStatic from "ffmpeg-static";
+
+const pipelineAsync = promisify(pipeline);
 
 /* -------------------------------------------------------------------------- */
 /*                               Binary handling                              */
 /* -------------------------------------------------------------------------- */
 
-const BIN_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), ".bin");
-const YTDLP_LOCAL = path.join(
-  BIN_DIR,
-  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp",
-);
+const BIN_DIR = path.join(/* turbopackIgnore: true */ process.cwd(), ".bin");
+const YTDLP_LOCAL = `${BIN_DIR}${path.sep}${process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"}`;
 
 let ytdlpPathPromise: Promise<string> | null = null;
 let supportsJsRuntimesCache: boolean | null = null;
+
+const YTDLP_RELEASE_URL =
+  process.platform === "win32"
+    ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
 
 function fileExists(p: string) {
   try {
@@ -30,11 +35,34 @@ function fileExists(p: string) {
 
 function whichSync(cmd: string): string | null {
   const pathEnv = process.env.PATH ?? "";
+  const sep = path.sep;
   for (const dir of pathEnv.split(path.delimiter)) {
-    const full = path.join(dir, cmd);
+    if (!dir) continue;
+    const full = dir.endsWith(sep) ? dir + cmd : dir + sep + cmd;
     if (fileExists(full)) return full;
   }
   return null;
+}
+
+/**
+ * آخرین نسخه‌ی باینری yt-dlp را از ریلیز رسمی GitHub دانلود می‌کند
+ * (بدون وابستگی به پکیج منسوخ‌شده‌ی yt-dlp-wrap).
+ */
+async function downloadYtDlpBinary(target: string): Promise<void> {
+  await fsp.mkdir(BIN_DIR, { recursive: true });
+  console.log("[ytdlp] downloading yt-dlp binary from GitHub...");
+  const res = await fetch(YTDLP_RELEASE_URL, { redirect: "follow" });
+  if (!res.ok || !res.body) {
+    throw new Error(`دریافت باینری yt-dlp ناموفق بود (HTTP ${res.status})`);
+  }
+  const tmp = `${target}.part`;
+  await pipelineAsync(
+    Readable.fromWeb(res.body as never),
+    createWriteStream(tmp, { mode: 0o755 }),
+  );
+  await fsp.rename(tmp, target);
+  await fsp.chmod(target, 0o755);
+  console.log("[ytdlp] yt-dlp downloaded to", target);
 }
 
 /**
@@ -52,11 +80,7 @@ export function getYtDlpPath(): Promise<string> {
     const system = whichSync("yt-dlp");
     if (system) return system;
 
-    await fsp.mkdir(BIN_DIR, { recursive: true });
-    console.log("[ytdlp] downloading yt-dlp binary from GitHub...");
-    await YTDlpWrap.downloadFromGithub(YTDLP_LOCAL);
-    await fsp.chmod(YTDLP_LOCAL, 0o755);
-    console.log("[ytdlp] yt-dlp downloaded to", YTDLP_LOCAL);
+    await downloadYtDlpBinary(YTDLP_LOCAL);
     return YTDLP_LOCAL;
   })();
 
@@ -110,7 +134,7 @@ async function commonArgs(): Promise<string[]> {
 
 function runCapture(bin: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(/* turbopackIgnore: true */ bin, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d.toString()));
@@ -296,7 +320,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
 /*                               Download engine                              */
 /* -------------------------------------------------------------------------- */
 
-export const DOWNLOAD_ROOT = path.join(os.tmpdir(), "yt-downloader-jobs");
+export const DOWNLOAD_ROOT = path.join(/* turbopackIgnore: true */ os.tmpdir(), "yt-downloader-jobs");
 
 export interface DownloadHandlers {
   onProgress: (progress: number, status: "downloading" | "processing") => void;
@@ -327,10 +351,10 @@ export function sanitizeFileName(name: string): string {
  */
 export async function runDownload(req: DownloadRequest, handlers: DownloadHandlers) {
   const bin = await getYtDlpPath();
-  const dir = path.join(DOWNLOAD_ROOT, req.jobId);
+  const dir = `${DOWNLOAD_ROOT}${path.sep}${req.jobId}`;
   await fsp.mkdir(dir, { recursive: true });
 
-  const outTemplate = path.join(dir, "output.%(ext)s");
+  const outTemplate = `${dir}${path.sep}output.%(ext)s`;
   const args = [...(await commonArgs()), "--newline", "--progress", "-o", outTemplate];
 
   if (req.kind === "video") {
@@ -367,7 +391,7 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
 
   args.push(req.url);
 
-  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(/* turbopackIgnore: true */ bin, args, { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   let lastProgress = 0;
   let downloadPhase = 0; // برای دانلودهای چندبخشی (ویدئو + صدا)
@@ -445,7 +469,7 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
         file = files.find((f) => f.startsWith("output.") && !/\.(part|ytdl|webp|jpg|png)$/.test(f));
       }
       if (!file) throw new Error("فایل خروجی پیدا نشد");
-      const full = path.join(dir, file);
+      const full = `${dir}${path.sep}${file}`;
       const stat = await fsp.stat(full);
       handlers.onDone(full, stat.size);
     } catch (e) {
@@ -458,6 +482,6 @@ export async function runDownload(req: DownloadRequest, handlers: DownloadHandle
 
 /** حذف پوشه یک job (پس از انقضا) */
 export async function removeJobDir(jobId: string) {
-  const dir = path.join(DOWNLOAD_ROOT, jobId);
+  const dir = `${DOWNLOAD_ROOT}${path.sep}${jobId}`;
   await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
 }

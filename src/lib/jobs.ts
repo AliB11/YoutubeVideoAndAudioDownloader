@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, lt } from "drizzle-orm";
-import { db } from "@/db";
+import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { db, isDbConfigured } from "@/db";
 import { downloads, type Download } from "@/db/schema";
-import { removeJobDir, runDownload, type VideoInfo } from "@/lib/ytdlp";
+import { removeJobDir, runDownload, sanitizeFileName, type VideoInfo } from "@/lib/ytdlp";
 
-/** مدت نگهداری فایل‌های دانلود‌شده روی سرور (میلی‌ثانیه) */
+/** مدت نگهداری فایل‌های دانلودشده روی سرور (میلی‌ثانیه) */
 const FILE_TTL_MS = Number(process.env.FILE_TTL_MINUTES ?? 120) * 60 * 1000;
 
 interface LiveJob {
@@ -15,10 +15,26 @@ interface LiveJob {
 
 const globalForJobs = globalThis as typeof globalThis & {
   __ytLiveJobs?: Map<string, LiveJob>;
+  __ytMemJobs?: Map<string, Download>;
   __ytCleanupTimer?: NodeJS.Timeout;
+  __ytDbWarns?: Set<string>;
 };
 
 const liveJobs = (globalForJobs.__ytLiveJobs ??= new Map<string, LiveJob>());
+/**
+ * نگه‌داری کامل jobها در حافظه:
+ * ۱) برای گزارش پیشرفت زنده بدون نیاز به خواندن دیتابیس
+ * ۲) به‌عنوان fallback وقتی PostgreSQL در دسترس نیست (تاریخچه ذخیره نمی‌شود اما دانلود کار می‌کند)
+ */
+const memJobs = (globalForJobs.__ytMemJobs ??= new Map<string, Download>());
+
+function warnOnce(key: string, msg: string) {
+  const warned = (globalForJobs.__ytDbWarns ??= new Set<string>());
+  if (!warned.has(key)) {
+    warned.add(key);
+    console.warn(msg);
+  }
+}
 
 function ensureCleanupTimer() {
   if (globalForJobs.__ytCleanupTimer) return;
@@ -29,25 +45,45 @@ function ensureCleanupTimer() {
 }
 
 export async function cleanupExpired() {
-  const cutoff = new Date(Date.now() - FILE_TTL_MS);
-  const expired = await db
-    .select({ id: downloads.id, jobId: downloads.jobId })
-    .from(downloads)
-    .where(and(lt(downloads.createdAt, cutoff), inArray(downloads.status, ["done", "error"])));
+  const cutoffMs = Date.now() - FILE_TTL_MS;
+  const cutoff = new Date(cutoffMs);
 
-  for (const row of expired) {
-    await removeJobDir(row.jobId);
+  // پاک‌سازی رکوردهای داخل حافظه (فایل + وضعیت)
+  for (const [jobId, job] of memJobs) {
+    const finished = job.status === "done" || job.status === "error";
+    if (finished && job.createdAt.getTime() < cutoffMs) {
+      await removeJobDir(jobId);
+      memJobs.delete(jobId);
+      liveJobs.delete(jobId);
+    }
   }
-  if (expired.length) {
-    await db
-      .update(downloads)
-      .set({ filePath: null, status: "expired" })
-      .where(
-        inArray(
-          downloads.id,
-          expired.map((r) => r.id),
-        ),
-      );
+
+  if (!isDbConfigured) return;
+
+  try {
+    const expired = await db
+      .select({ id: downloads.id, jobId: downloads.jobId })
+      .from(downloads)
+      .where(and(lt(downloads.createdAt, cutoff), inArray(downloads.status, ["done", "error"])));
+
+    for (const row of expired) {
+      await removeJobDir(row.jobId);
+      memJobs.delete(row.jobId);
+      liveJobs.delete(row.jobId);
+    }
+    if (expired.length) {
+      await db
+        .update(downloads)
+        .set({ filePath: null, status: "expired" })
+        .where(
+          inArray(
+            downloads.id,
+            expired.map((r) => r.id),
+          ),
+        );
+    }
+  } catch (e) {
+    warnOnce("cleanup", `[jobs] cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -58,43 +94,75 @@ export interface CreateJobInput {
   info: Pick<VideoInfo, "id" | "title" | "thumbnail" | "uploader" | "duration">;
 }
 
+type JobPatch = Partial<
+  Pick<Download, "progress" | "status" | "filePath" | "fileSize" | "error" | "completedAt">
+>;
+
+function buildFileName(title: string | null | undefined, qualityLabel: string, ext: string) {
+  const safeTitle = sanitizeFileName(title ?? "download");
+  return `${safeTitle} [${qualityLabel}].${ext}`;
+}
+
+/** به‌روزرسانی حافظه و (در صورت وجود دیتابیس) ذخیره‌ی ماندگار */
+async function persist(jobId: string, patch: JobPatch) {
+  const cur = memJobs.get(jobId);
+  if (cur) memJobs.set(jobId, { ...cur, ...patch });
+
+  if (!isDbConfigured) return;
+  try {
+    await db.update(downloads).set(patch).where(eq(downloads.jobId, jobId));
+  } catch (e) {
+    warnOnce("update", `[jobs] db update failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 export async function createJob(input: CreateJobInput): Promise<Download> {
   ensureCleanupTimer();
   const jobId = randomUUID();
   const qualityLabel = input.kind === "video" ? `${input.quality}p` : `${input.quality}kbps`;
   const ext = input.kind === "video" ? "mp4" : "mp3";
-  const safeTitle = (input.info.title || "download")
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
-  const fileName = `${safeTitle} [${qualityLabel}].${ext}`;
+  const fileName = buildFileName(input.info.title, qualityLabel, ext);
 
-  const [row] = await db
-    .insert(downloads)
-    .values({
-      jobId,
-      url: input.url,
-      videoId: input.info.id,
-      title: input.info.title,
-      thumbnail: input.info.thumbnail,
-      uploader: input.info.uploader,
-      duration: input.info.duration ?? null,
-      kind: input.kind,
-      quality: qualityLabel,
-      status: "downloading",
-      progress: 0,
-      fileName,
-    })
-    .returning();
-
-  liveJobs.set(jobId, { progress: 0, status: "downloading", lastDbWrite: 0 });
-
-  const persist = async (patch: Partial<typeof downloads.$inferInsert>) => {
-    await db.update(downloads).set(patch).where(eq(downloads.jobId, jobId)).catch((e) => {
-      console.error("[jobs] db update failed", e);
-    });
+  const values = {
+    jobId,
+    url: input.url,
+    videoId: input.info.id,
+    title: input.info.title,
+    thumbnail: input.info.thumbnail,
+    uploader: input.info.uploader,
+    duration: input.info.duration ?? null,
+    kind: input.kind,
+    quality: qualityLabel,
+    status: "downloading",
+    progress: 0,
+    fileName,
   };
+
+  let row: Download | null = null;
+  if (isDbConfigured) {
+    try {
+      const [inserted] = await db.insert(downloads).values(values).returning();
+      row = inserted;
+    } catch (e) {
+      warnOnce("insert", `[jobs] db insert failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // اگر دیتابیس در دسترس نبود، یک رکورد در حافظه می‌سازیم تا دانلود همچنان کار کند
+  if (!row) {
+    row = {
+      ...values,
+      id: 0,
+      filePath: null,
+      fileSize: null,
+      error: null,
+      createdAt: new Date(),
+      completedAt: null,
+    };
+  }
+
+  memJobs.set(jobId, row);
+  liveJobs.set(jobId, { progress: 0, status: "downloading", lastDbWrite: 0 });
 
   runDownload(
     { jobId, url: input.url, kind: input.kind, quality: input.quality },
@@ -107,12 +175,12 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
         const now = Date.now();
         if (now - live.lastDbWrite > 1500) {
           live.lastDbWrite = now;
-          void persist({ progress, status });
+          void persist(jobId, { progress, status });
         }
       },
       onDone: (filePath, fileSize) => {
         liveJobs.set(jobId, { progress: 100, status: "done", lastDbWrite: Date.now() });
-        void persist({
+        void persist(jobId, {
           progress: 100,
           status: "done",
           filePath,
@@ -122,26 +190,55 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
       },
       onError: (message) => {
         liveJobs.set(jobId, { progress: 0, status: "error", lastDbWrite: Date.now() });
-        void persist({ status: "error", error: message, completedAt: new Date() });
+        void persist(jobId, { status: "error", error: message, completedAt: new Date() });
       },
     },
   ).catch((e) => {
     const message = e instanceof Error ? e.message : String(e);
     liveJobs.set(jobId, { progress: 0, status: "error", lastDbWrite: Date.now() });
-    void persist({ status: "error", error: message, completedAt: new Date() });
+    void persist(jobId, { status: "error", error: message, completedAt: new Date() });
   });
 
   return row;
 }
 
 export async function getJob(jobId: string): Promise<Download | null> {
-  const [row] = await db.select().from(downloads).where(eq(downloads.jobId, jobId)).limit(1);
-  if (!row) return null;
+  const mem = memJobs.get(jobId);
   const live = liveJobs.get(jobId);
-  if (live && row.status !== "done" && row.status !== "error") {
-    return { ...row, progress: live.progress, status: live.status };
+  if (mem) {
+    if (live && mem.status !== "done" && mem.status !== "error") {
+      return { ...mem, progress: live.progress, status: live.status };
+    }
+    return mem;
   }
-  return row;
+
+  if (!isDbConfigured) return null;
+
+  try {
+    const [row] = await db.select().from(downloads).where(eq(downloads.jobId, jobId)).limit(1);
+    return row ?? null;
+  } catch (e) {
+    warnOnce("get", `[jobs] db select failed: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
+/** فهرست آخرین دانلودها (تاریخچه) — از دیتابیس یا در نبود آن از حافظه */
+export async function listJobs(limit = 30): Promise<Download[]> {
+  if (isDbConfigured) {
+    try {
+      return await db
+        .select()
+        .from(downloads)
+        .orderBy(desc(downloads.createdAt))
+        .limit(limit);
+    } catch (e) {
+      warnOnce("select", `[jobs] db select failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return [...memJobs.values()]
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, limit);
 }
 
 export function toPublicJob(row: Download) {

@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { Vazirmatn } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const vazir = Vazirmatn({
-  subsets: ["arabic", "latin"],
+const vazir = localFont({
+  src: "./fonts/Vazirmatn[wght].woff2",
+  weight: "100 900",
   variable: "--font-vazir",
   display: "swap",
 });
@@ -13,6 +14,15 @@ export const metadata: Metadata = {
   title: "یوتیوب دانلودر | دانلود ویدئو و MP3 از یوتیوب",
   description:
     "دانلود ویدئوهای یوتیوب با کیفیت‌های مختلف (تا 4K) و تبدیل به MP3 با بیت‌ریت دلخواه — سریع، رایگان و بدون محدودیت.",
+  icons: {
+    icon: "/icon.svg",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0f0f13",
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
