@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   // پکیج‌های باینری نباید توسط bundler پردازش شوند
-  serverExternalPackages: ["yt-dlp-wrap", "ffmpeg-static"],
+  serverExternalPackages: ["ffmpeg-static"],
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "**.ytimg.com" },

@@ -35,3 +35,12 @@ export function formatRelative(date: string | Date): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)} ساعت پیش`;
   return `${Math.floor(diff / 86400)} روز پیش`;
 }
+
+const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+
+/** تبدیل ارقام لاتین به فارسی (برای اعداد نمایشی مانند مدت‌زمان و بازدید) */
+export function faNum(input: string | number): string {
+  return String(input)
+    .replace(/[0-9]/g, (d) => FA_DIGITS[Number(d)])
+    .replace(/\./g, "٫");
+}

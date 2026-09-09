@@ -6,11 +6,22 @@
 
 body {
   background:
-    radial-gradient(1200px 600px at 80% -10%, rgba(239, 68, 68, 0.18), transparent 60%),
-    radial-gradient(900px 500px at -10% 20%, rgba(59, 130, 246, 0.14), transparent 60%),
-    #020617;
+    radial-gradient(1100px 620px at 85% -10%, rgba(239, 68, 68, 0.2), transparent 60%),
+    radial-gradient(900px 520px at -15% 15%, rgba(59, 130, 246, 0.16), transparent 60%),
+    radial-gradient(700px 700px at 50% 120%, rgba(168, 85, 247, 0.1), transparent 60%),
+    #06060b;
 }
 
+/* شبکه‌ی محو پس‌زمینه */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+}
+
+/* ------------------------------- animations ------------------------------- */
 @keyframes shimmer {
   0% {
     background-position: -200% 0;
@@ -18,6 +29,49 @@ body {
   100% {
     background-position: 200% 0;
   }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-7px);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-float-slow {
+  animation: float-slow 5s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2.4s ease-in-out infinite;
 }
 
 .progress-shimmer {
@@ -31,7 +85,33 @@ body {
   animation: shimmer 1.4s linear infinite;
 }
 
-/* اعداد لاتین در متن فارسی */
+/* ------------------------------- text helpers ------------------------------ */
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+.gradient-text {
+  background: linear-gradient(100deg, #fda4af 0%, #f43f5e 45%, #fb7185 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* -------------------------------- scrollbar -------------------------------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: content-box;
 }

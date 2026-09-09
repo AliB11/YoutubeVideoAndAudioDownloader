@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 function contentDisposition(fileName: string) {
   const ascii = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'");
-  const encoded = encodeURIComponent(fileName).replace(/['()]/g, escape).replace(/\*/g, "%2A");
+  const encoded = encodeURIComponent(fileName)
+    .replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
