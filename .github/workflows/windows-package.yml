@@ -2,10 +2,10 @@ name: Windows package
 
 # ساخت بسته‌ی ویندوز (نصب‌کننده‌ی EXE + نسخه‌ی قابل‌حمل ZIP) روی رانر ویندوزی گیت‌هاب.
 #
-# - با هر push روی شاخه‌های arena/** یا main، بسته ساخته می‌شود و به‌عنوان Artifact
-#   قابل دانلود است (تب Actions → همان اجرا → بخش Artifacts).
+# - با هر push روی شاخه‌های main یا arena/**، بسته ساخته می‌شود و در تب Actions
+#   (بخش Artifacts همان اجرا) قابل دانلود است.
 # - با push تگ v* (مثلاً v1.0.0) یا اجرای دستی با publish=true، فایل‌ها به
-#   GitHub Releases هم منتشر می‌شوند تا با یک کلیک نصب شوند.
+#   GitHub Releases منتشر می‌شوند تا کاربران با یک کلیک دانلود و نصب کنند.
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
   build:
     name: Build Windows installer
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint · Typecheck · Unit tests
+      - name: Lint, typecheck and unit tests
         run: |
           npm run lint
           npm run typecheck
@@ -65,7 +65,7 @@ jobs:
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Package version: $version"
 
-      - name: Build packages (portable + installer)
+      - name: Build packages
         id: build
         shell: pwsh
         run: |
@@ -75,29 +75,16 @@ jobs:
             Tee-Object -FilePath $log
           $code = $LASTEXITCODE
           if ($null -eq $code) { $code = 0 }
-          if ($code -ne 0) { throw "build.ps1 با کد $code ناموفق بود" }
-
-      - name: Report build failure
-        if: failure()
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $log = "packaging/windows/dist/build.log"
-          $tail = if (Test-Path $log) { (Get-Content $log -Tail 80) -join "`n" } else { "(لاگ ساخت پیدا نشد)" }
-          $body = @"
-### ❌ ساخت بسته‌ی ویندوز ناموفق بود
-
-``````
-$tail
-``````
-"@
-          Set-Content -Path build-failure.md -Value $body -Encoding UTF8
-          gh issue comment 2 --repo ${{ github.repository }} --body-file build-failure.md
+          Write-Host "build.ps1 exit code: $code"
+          if ($code -ne 0) { throw "build.ps1 failed with exit code $code" }
 
       - name: Show outputs
+        if: success()
         shell: pwsh
-        run: Get-ChildItem packaging/windows/dist -File | Select-Object Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table -AutoSize
+        run: |
+          Get-ChildItem packaging/windows/dist -File |
+            Select-Object Name, @{ n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } } |
+            Format-Table -AutoSize
 
       - name: Upload build log
         if: always()
@@ -108,7 +95,7 @@ $tail
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Upload artifacts
+      - name: Upload installer and portable zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -121,25 +108,44 @@ $tail
           compression-level: 0
           retention-days: 30
 
+      # در صورت خرابی، انتهای لاگ ساخت در Issue شماره ۲ ثبت می‌شود تا عیب‌یابی ساده باشد.
+      - name: Report build failure
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = "packaging/windows/dist/build.log"
+          if (Test-Path $log) {
+            $tail = (Get-Content $log -Tail 80) -join [Environment]::NewLine
+          } else {
+            $tail = "(build log not found)"
+          }
+          Set-Content -Path build-failure.log -Value $tail -Encoding UTF8
+          gh issue comment 2 --repo ${{ github.repository }} --body-file build-failure.log
+
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true'
+        if: success() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "v${{ steps.version.outputs.value }}"
+          $version = "${{ steps.version.outputs.value }}"
           Write-Host "Publishing $tag"
-          $exists = $false
-          try { gh release view $tag | Out-Null; $exists = $true } catch { $exists = $false }
+          $previous = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          & gh release view $tag | Out-Null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $previous
           if (-not $exists) {
-            gh release create $tag --title "یوتیوب دانلودر ${{ steps.version.outputs.value }}" --notes @"
-          بسته‌ی ویندوز «یوتیوب دانلودر»
-
-          - **YouTubeDownloader-Setup-${{ steps.version.outputs.value }}-x64.exe** — نصب‌کننده (بدون نیاز به دسترسی مدیر)
-          - **YouTubeDownloader-Portable-${{ steps.version.outputs.value }}-x64.zip** — نسخه‌ی قابل‌حمل (بدون نصب)
-
-          پس از نصب، از منوی استارت «یوتیوب دانلودر» را اجرا کنید؛ مرورگر خودکار باز می‌شود.
-          "@
+            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" +
+              [Environment]::NewLine + [Environment]::NewLine +
+              "فایل Setup نصب‌کننده‌ی ویندوز است (بدون نیاز به دسترسی مدیر) و فایل Portable بدون نصب اجرا می‌شود." +
+              [Environment]::NewLine +
+              "پس از نصب، از منوی استارت «یوتیوب دانلودر» را اجرا کنید؛ مرورگر خودکار باز می‌شود."
+            $notes | Out-File -FilePath release-notes.md -Encoding utf8
+            & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md
           }
           Get-ChildItem packaging/windows/dist -File -Include *.exe, *.zip, SHA256SUMS.txt |
-            ForEach-Object { gh release upload $tag $_.FullName --clobber }
+            ForEach-Object { & gh release upload $tag $_.FullName --clobber }
