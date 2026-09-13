@@ -31,8 +31,8 @@ param(
     [string]$Arch = "x64",
     [bool]$Portable = $true,
     [bool]$Installer = $true,
-    [bool]$AutoInstallInno = $false,
-    [bool]$SkipChecks = $false,
+    [switch]$AutoInstallInno,
+    [switch]$SkipChecks,
     [bool]$VerifyPackage = $true,
     [bool]$Clean = $true,
     [switch]$Publish,
@@ -143,7 +143,7 @@ Write-Info "نسخه‌ی بسته: $Version"
 # ---------------------------------------------------------------------------
 # ۱) بررسی‌های کیفیت و بیلد
 # ---------------------------------------------------------------------------
-if ($SkipChecks) {
+if ($SkipChecks.IsPresent) {
     Write-Step "رد کردن بررسی‌های کیفیت (SkipChecks)"
 } else {
     Write-Step "بررسی‌های کیفیت (lint / typecheck / test)"
@@ -420,7 +420,7 @@ if ($Installer) {
         $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
         if ($command) { $iscc = $command.Source }
     }
-    if (-not $iscc -and $AutoInstallInno) {
+    if (-not $iscc -and $AutoInstallInno.IsPresent) {
         Write-Info "Inno Setup نصب نیست؛ تلاش برای نصب خودکار..."
         $previous = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
