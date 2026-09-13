@@ -8,6 +8,8 @@ node_modules
 *.log
 npm-debug.log*
 README.md
+tests
+scripts
 .dockerignore
 Dockerfile
 docker-compose.yml

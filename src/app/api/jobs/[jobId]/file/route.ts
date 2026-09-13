@@ -1,23 +1,12 @@
-import fs from "node:fs";
-import fsp from "node:fs/promises";
-import { Readable } from "node:stream";
 import { NextRequest } from "next/server";
 import { getJob } from "@/lib/jobs";
+import { jobDir } from "@/lib/ytdlp";
+import { isPathInside } from "@/lib/files";
+import { streamFileResponse } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-function contentDisposition(fileName: string) {
-  const ascii = fileName.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'");
-  const encoded = encodeURIComponent(fileName)
-    .replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
-
-/** ارسال فایل نهایی به مرورگر کاربر */
-export async function GET(
-  req: NextRequest,
-  { params }: { params: Promise<{ jobId: string }> },
-) {
+async function handle(req: NextRequest, params: Promise<{ jobId: string }>, head: boolean) {
   const { jobId } = await params;
   const job = await getJob(jobId);
 
@@ -26,56 +15,29 @@ export async function GET(
     return Response.json({ error: "فایل هنوز آماده نیست" }, { status: 409 });
   }
 
-  let stat: fs.Stats;
-  try {
-    stat = await fsp.stat(job.filePath);
-  } catch {
-    return Response.json(
-      { error: "فایل منقضی شده است. لطفاً دوباره دانلود کنید." },
-      { status: 410 },
-    );
+  // لایه‌ی دفاعی: فایل فقط از داخل پوشه‌ی همان job قابل ارسال است
+  if (!isPathInside(jobDir(jobId), job.filePath)) {
+    console.error("[api/jobs/file] مسیر فایل خارج از پوشه‌ی job است", job.filePath);
+    return Response.json({ error: "مسیر فایل نامعتبر است" }, { status: 500 });
   }
 
-  const total = stat.size;
-  const mime = job.kind === "video" ? "video/mp4" : "audio/mpeg";
-  const fileName = job.fileName ?? `download.${job.kind === "video" ? "mp4" : "mp3"}`;
+  const extension = job.kind === "video" ? "mp4" : "mp3";
+  return streamFileResponse({
+    filePath: job.filePath,
+    fileName: job.fileName || `download.${extension}`,
+    mime: job.kind === "video" ? "video/mp4" : "audio/mpeg",
+    range: req.headers.get("range"),
+    head,
+    signal: req.signal,
+  });
+}
 
-  const headers: Record<string, string> = {
-    "Content-Type": mime,
-    "Content-Disposition": contentDisposition(fileName),
-    "Accept-Ranges": "bytes",
-    "Cache-Control": "no-store",
-  };
+/** GET /api/jobs/:jobId/file — ارسال فایل نهایی به مرورگر (با پشتیبانی Range) */
+export async function GET(req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
+  return handle(req, params, false);
+}
 
-  const range = req.headers.get("range");
-  let start = 0;
-  let end = total - 1;
-  let status = 200;
-
-  if (range) {
-    const m = /bytes=(\d*)-(\d*)/.exec(range);
-    if (m) {
-      if (m[1]) start = parseInt(m[1], 10);
-      if (m[2]) end = parseInt(m[2], 10);
-      if (!m[1] && m[2]) {
-        start = Math.max(0, total - parseInt(m[2], 10));
-        end = total - 1;
-      }
-      if (start >= total || end >= total || start > end) {
-        return new Response(null, {
-          status: 416,
-          headers: { "Content-Range": `bytes */${total}` },
-        });
-      }
-      status = 206;
-      headers["Content-Range"] = `bytes ${start}-${end}/${total}`;
-    }
-  }
-
-  headers["Content-Length"] = String(end - start + 1);
-
-  const nodeStream = fs.createReadStream(job.filePath, { start, end });
-  const webStream = Readable.toWeb(nodeStream) as ReadableStream;
-
-  return new Response(webStream, { status, headers });
+/** HEAD /api/jobs/:jobId/file — بررسی وجود و اندازه‌ی فایل بدون دانلود آن */
+export async function HEAD(req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
+  return handle(req, params, true);
 }

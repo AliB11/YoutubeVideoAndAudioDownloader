@@ -1,4 +1,4 @@
-import type { AudioQuality, VideoInfo, VideoQuality } from "@/lib/ytdlp";
+import type { VideoInfo, VideoQuality, AudioQuality } from "@/lib/ytdlp";
 import type { PublicJob } from "@/lib/jobs";
 
 /**
@@ -47,26 +47,49 @@ const audioQualities: AudioQuality[] = [
   { bitrate: 64, label: "64 kbps", filesize: 5_600_000, tag: "حجم کم" },
 ];
 
-export const demoInfo: VideoInfo = {
-  id: "demo-video",
-  title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+/** اطلاعات نمونه‌ی ویدئو (هم در صفحه‌ی پیش‌نمایش و هم در DEMO_MODE سرور استفاده می‌شود) */
+export const demoVideoInfo: VideoInfo = {
+  id: "dQw4w9WgXcQ",
+  title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
   thumbnail: T_MAIN,
   duration: 212,
   uploader: "کانال نمونه",
   viewCount: 1_234_567,
-  webpageUrl: "https://www.youtube.com/watch?v=demo",
+  webpageUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   videoQualities,
   audioQualities,
   sourceAudioBitrate: 128,
 };
 
+/** نام قدیمی (سازگاری با کامپوننت‌ها) */
+export const demoInfo = demoVideoInfo;
+
 const now = Date.now();
 const min = 60_000;
 
+/** ساخت job نمایشی با مقادیر پیش‌فرض برای فیلدهای مربوط به پیشرفت زنده */
+function job(
+  partial: Omit<
+    PublicJob,
+    "videoId" | "speed" | "eta" | "downloadedBytes" | "totalBytes" | "queuePosition"
+  > &
+    Partial<Pick<PublicJob, "videoId" | "speed" | "eta" | "downloadedBytes" | "totalBytes" | "queuePosition">>,
+): PublicJob {
+  return {
+    videoId: "dQw4w9WgXcQ",
+    speed: null,
+    eta: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    queuePosition: null,
+    ...partial,
+  };
+}
+
 export const demoActiveJobs: PublicJob[] = [
-  {
+  job({
     jobId: "demo-active-video",
-    title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+    title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
     thumbnail: T_VIDEO,
     uploader: "کانال نمونه",
     duration: 212,
@@ -80,30 +103,52 @@ export const demoActiveJobs: PublicJob[] = [
     createdAt: new Date(now - 2 * min),
     completedAt: null,
     downloadUrl: null,
-  },
-  {
+    speed: "3.4MiB/s",
+    eta: "00:42",
+    downloadedBytes: 296_000_000,
+    totalBytes: 640_000_000,
+  }),
+  job({
     jobId: "demo-active-audio",
-    title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+    title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
     thumbnail: T_AUDIO,
     uploader: "کانال نمونه",
     duration: 212,
     kind: "audio",
     quality: "320kbps",
     status: "processing",
-    progress: 96,
+    progress: 95,
     fileName: "نمونه ویدئو [320kbps].mp3",
     fileSize: null,
     error: null,
     createdAt: new Date(now - 5 * min),
     completedAt: null,
     downloadUrl: null,
-  },
+  }),
+  job({
+    jobId: "demo-queued",
+    title: "ویدئوی در صف دانلود",
+    thumbnail: T_VIDEO2,
+    uploader: "کانال نمونه",
+    duration: 380,
+    kind: "video",
+    quality: "2160p",
+    status: "pending",
+    progress: 0,
+    fileName: "ویدئوی در صف دانلود [2160p].mp4",
+    fileSize: null,
+    error: null,
+    createdAt: new Date(now - 30_000),
+    completedAt: null,
+    downloadUrl: null,
+    queuePosition: 2,
+  }),
 ];
 
 export const demoHistory: PublicJob[] = [
-  {
+  job({
     jobId: "demo-done",
-    title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+    title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
     thumbnail: T_VIDEO2,
     uploader: "کانال نمونه",
     duration: 212,
@@ -117,10 +162,10 @@ export const demoHistory: PublicJob[] = [
     createdAt: new Date(now - 12 * min),
     completedAt: new Date(now - 10 * min),
     downloadUrl: "/api/jobs/demo-done/file",
-  },
-  {
+  }),
+  job({
     jobId: "demo-audio-done",
-    title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+    title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
     thumbnail: T_AUDIO2,
     uploader: "کانال نمونه",
     duration: 212,
@@ -134,8 +179,8 @@ export const demoHistory: PublicJob[] = [
     createdAt: new Date(now - 40 * min),
     completedAt: new Date(now - 38 * min),
     downloadUrl: "/api/jobs/demo-audio-done/file",
-  },
-  {
+  }),
+  job({
     jobId: "demo-error",
     title: "ویدئوی غیرقابل دسترس",
     thumbnail: T_ERR,
@@ -147,14 +192,14 @@ export const demoHistory: PublicJob[] = [
     progress: 0,
     fileName: "ویدئوی غیرقابل دسترس [128kbps].mp3",
     fileSize: null,
-    error: "یوتیوب این ویدئو را در دسترس قرار نمی‌دهد (خطای ۴۰۳).",
+    error: "این ویدئو خصوصی است و بدون کوکی حساب صاحب آن قابل دانلود نیست.",
     createdAt: new Date(now - 90 * min),
     completedAt: new Date(now - 89 * min),
     downloadUrl: null,
-  },
-  {
+  }),
+  job({
     jobId: "demo-cancelled",
-    title: "نمونه‌ی ویدئو برای نمایش طراحی رابط کاربری دانلودر یوتیوب",
+    title: "نمونه‌ی ویدئو برای نمایش رابط کاربری دانلودر یوتیوب",
     thumbnail: T_MAIN,
     uploader: "کانال نمونه",
     duration: 212,
@@ -168,8 +213,8 @@ export const demoHistory: PublicJob[] = [
     createdAt: new Date(now - 3 * 60 * min),
     completedAt: new Date(now - 3 * 60 * min),
     downloadUrl: null,
-  },
-  {
+  }),
+  job({
     jobId: "demo-expired",
     title: "ویدئوی قدیمی",
     thumbnail: T_AUDIO,
@@ -185,5 +230,5 @@ export const demoHistory: PublicJob[] = [
     createdAt: new Date(now - 26 * 60 * 60 * 1000),
     completedAt: new Date(now - 25 * 60 * 60 * 1000),
     downloadUrl: null,
-  },
+  }),
 ];
