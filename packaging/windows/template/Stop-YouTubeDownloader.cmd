@@ -13,4 +13,3 @@ taskkill /IM yt-dlp.exe /F >nul 2>&1
 taskkill /IM ffmpeg.exe /F >nul 2>&1
 
 echo Done.
-timeout /t 3 >nul

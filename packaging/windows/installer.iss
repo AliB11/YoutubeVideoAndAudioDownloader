@@ -130,8 +130,8 @@ Name: "{userstartup}\{#AppName}"; Filename: "{app}\Start-YouTubeDownloader.cmd";
 Filename: "{app}\Start-YouTubeDownloader.cmd"; Description: "اجرای {#AppName}"; Flags: nowait postinstall skipifsilent shellexec
 
 [UninstallRun]
-; پیش از حذف، سرویس در حال اجرا متوقف می‌شود
-Filename: "{app}\Stop-YouTubeDownloader.cmd"; Flags: shellexec runasoriginaluser runhidden; RunOnceId: "StopServer"
+; پیش از حذف، سرویس در حال اجرا متوقف می‌شود (بدون نیاز به اجرای مرورگر یا پنجره‌ی اضافه)
+Filename: "{app}\Stop-YouTubeDownloader.cmd"; Flags: runhidden waituntilterminated; RunOnceId: "StopServer"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\data"
