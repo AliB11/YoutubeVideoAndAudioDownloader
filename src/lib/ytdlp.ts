@@ -1,168 +1,48 @@
-import { spawn } from "node:child_process";
-import fs, { createWriteStream } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Readable, pipeline } from "node:stream";
-import { promisify } from "node:util";
-import ffmpegStatic from "ffmpeg-static";
+import {
+  AUDIO_BITRATES,
+  buildCommonArgs,
+  buildDownloadArgs,
+  cleanYtDlpError,
+  mapYtDlpError,
+  type DownloadKind,
+} from "@/lib/ytdlp-args";
+import { DownloadProgressTracker, type ProgressMetrics } from "@/lib/progress";
+import { pickOutputFile, sanitizeFileName } from "@/lib/files";
+import { demoBaseUrl, demoMediaUrl, ensureDemoMedia, isDemoMode } from "@/lib/demo-source";
+import { getFfmpegPath, getYtDlpCapabilities, getYtDlpPath, runCapture, YTDLP_CACHE_DIR } from "@/lib/toolchain";
 
-const pipelineAsync = promisify(pipeline);
+export { sanitizeFileName } from "@/lib/files";
+export type { DownloadKind } from "@/lib/ytdlp-args";
+export { AUDIO_BITRATES } from "@/lib/ytdlp-args";
 
 /* -------------------------------------------------------------------------- */
-/*                               Binary handling                              */
+/*                                  Config                                    */
 /* -------------------------------------------------------------------------- */
 
-const BIN_DIR = path.join(/* turbopackIgnore: true */ process.cwd(), ".bin");
-const YTDLP_LOCAL = `${BIN_DIR}${path.sep}${process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"}`;
+/** ریشه‌ی فایل‌های دانلودشده (قابل تنظیم با DOWNLOAD_DIR — مفید برای مانت‌کردن volume) */
+export const DOWNLOAD_ROOT =
+  process.env.DOWNLOAD_DIR?.trim() || path.join(/* turbopackIgnore: true */ os.tmpdir(), "yt-downloader-jobs");
 
-let ytdlpPathPromise: Promise<string> | null = null;
-let supportsJsRuntimesCache: boolean | null = null;
+/** حداکثر زمان استخراج اطلاعات ویدئو (میلی‌ثانیه) */
+const INFO_TIMEOUT_MS = Number(process.env.YTDLP_INFO_TIMEOUT_MS ?? 120_000);
+/** مدت اعتبار کش اطلاعات ویدئو (برای جلوگیری از درخواست‌های تکراری به یوتیوب) */
+const INFO_CACHE_TTL_MS = Number(process.env.INFO_CACHE_TTL_MS ?? 5 * 60 * 1000);
 
-const YTDLP_RELEASE_URL =
-  process.platform === "win32"
-    ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-    : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
-
-function fileExists(p: string) {
-  try {
-    fs.accessSync(p, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function whichSync(cmd: string): string | null {
-  const pathEnv = process.env.PATH ?? "";
-  const sep = path.sep;
-  for (const dir of pathEnv.split(path.delimiter)) {
-    if (!dir) continue;
-    const full = dir.endsWith(sep) ? dir + cmd : dir + sep + cmd;
-    if (fileExists(full)) return full;
-  }
-  return null;
-}
-
-/**
- * آخرین نسخه‌ی باینری yt-dlp را از ریلیز رسمی GitHub دانلود می‌کند
- * (بدون وابستگی به پکیج منسوخ‌شده‌ی yt-dlp-wrap).
- */
-async function downloadYtDlpBinary(target: string): Promise<void> {
-  await fsp.mkdir(BIN_DIR, { recursive: true });
-  console.log("[ytdlp] downloading yt-dlp binary from GitHub...");
-  const res = await fetch(YTDLP_RELEASE_URL, { redirect: "follow" });
-  if (!res.ok || !res.body) {
-    throw new Error(`دریافت باینری yt-dlp ناموفق بود (HTTP ${res.status})`);
-  }
-  const tmp = `${target}.part`;
-  await pipelineAsync(
-    Readable.fromWeb(res.body as never),
-    createWriteStream(tmp, { mode: 0o755 }),
-  );
-  await fsp.rename(tmp, target);
-  await fsp.chmod(target, 0o755);
-  console.log("[ytdlp] yt-dlp downloaded to", target);
-}
-
-/**
- * مسیر باینری yt-dlp را برمی‌گرداند. در صورت نبود، آخرین نسخه را از GitHub دانلود می‌کند.
- */
-export function getYtDlpPath(): Promise<string> {
-  if (ytdlpPathPromise) return ytdlpPathPromise;
-
-  ytdlpPathPromise = (async () => {
-    if (process.env.YTDLP_PATH && fileExists(process.env.YTDLP_PATH)) {
-      return process.env.YTDLP_PATH;
-    }
-    if (fileExists(YTDLP_LOCAL)) return YTDLP_LOCAL;
-
-    const system = whichSync("yt-dlp");
-    if (system) return system;
-
-    await downloadYtDlpBinary(YTDLP_LOCAL);
-    return YTDLP_LOCAL;
-  })();
-
-  ytdlpPathPromise.catch(() => {
-    ytdlpPathPromise = null;
-  });
-
-  return ytdlpPathPromise;
-}
-
-export function getFfmpegPath(): string | null {
-  if (process.env.FFMPEG_PATH && fileExists(process.env.FFMPEG_PATH)) {
-    return process.env.FFMPEG_PATH;
-  }
-  const staticPath = ffmpegStatic as unknown as string | null;
-  if (staticPath && fileExists(staticPath)) return staticPath;
-  return whichSync("ffmpeg");
-}
-
-async function supportsJsRuntimes(bin: string): Promise<boolean> {
-  if (supportsJsRuntimesCache !== null) return supportsJsRuntimesCache;
-  const help = await runCapture(bin, ["--help"]).catch(() => "");
-  supportsJsRuntimesCache = help.includes("--js-runtimes");
-  return supportsJsRuntimesCache;
-}
-
-/** آرگومان‌های مشترک تمام فراخوانی‌های yt-dlp */
-async function commonArgs(): Promise<string[]> {
-  const bin = await getYtDlpPath();
-  const args = ["--no-playlist", "--no-warnings", "--no-check-certificates"];
-
-  const ffmpeg = getFfmpegPath();
-  if (ffmpeg) args.push("--ffmpeg-location", ffmpeg);
-
-  // yt-dlp جدید برای حل چالش‌های یوتیوب به یک JS runtime نیاز دارد؛ Node را فعال می‌کنیم.
-  if (await supportsJsRuntimes(bin)) {
-    args.push("--js-runtimes", `node:${process.execPath}`);
-  }
-
-  if (process.env.YTDLP_COOKIES_FILE && fs.existsSync(process.env.YTDLP_COOKIES_FILE)) {
-    args.push("--cookies", process.env.YTDLP_COOKIES_FILE);
-  }
-  if (process.env.YTDLP_PROXY) {
-    args.push("--proxy", process.env.YTDLP_PROXY);
-  }
-  if (process.env.YTDLP_EXTRA_ARGS) {
-    args.push(...process.env.YTDLP_EXTRA_ARGS.split(" ").filter(Boolean));
-  }
-  return args;
-}
-
-function runCapture(bin: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(/* turbopackIgnore: true */ bin, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    child.stdout.on("data", (d) => (out += d.toString()));
-    child.stderr.on("data", (d) => (err += d.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(out);
-      else reject(new Error(cleanError(err) || `yt-dlp exited with code ${code}`));
-    });
-  });
-}
-
-function cleanError(stderr: string): string {
-  const lines = stderr
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith("ERROR"));
-  const last = lines[lines.length - 1] ?? stderr.trim().split("\n").pop() ?? "";
-  return last.replace(/^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]+:\s*)?/, "").slice(0, 400);
+export function jobDir(jobId: string): string {
+  return path.join(/* turbopackIgnore: true */ DOWNLOAD_ROOT, jobId.replace(/[^\w-]/g, ""));
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                  Video info                                */
+/*                                   Types                                    */
 /* -------------------------------------------------------------------------- */
 
 export interface VideoQuality {
   height: number;
-  label: string; // "1080p"
+  label: string; // "1080p" یا "1080p60"
   fps: number | null;
   ext: string;
   vcodec: string | null;
@@ -171,10 +51,10 @@ export interface VideoQuality {
 }
 
 export interface AudioQuality {
-  bitrate: number; // kbps
+  bitrate: number;
   label: string; // "320 kbps"
   filesize: number | null;
-  tag: string; // توضیح کوتاه
+  tag: string;
 }
 
 export interface VideoInfo {
@@ -207,8 +87,8 @@ interface RawFormat {
 }
 
 interface RawInfo {
-  id: string;
-  title: string;
+  id?: string;
+  title?: string;
   thumbnail?: string;
   thumbnails?: { url: string }[];
   duration?: number;
@@ -217,62 +97,169 @@ interface RawInfo {
   view_count?: number;
   webpage_url?: string;
   formats?: RawFormat[];
+  is_live?: boolean;
+  live_status?: string;
+  availability?: string;
+  age_limit?: number;
 }
 
-const MP3_BITRATES = [320, 256, 192, 160, 128, 96, 64];
+/* -------------------------------------------------------------------------- */
+/*                              URL validation                                */
+/* -------------------------------------------------------------------------- */
 
+const YOUTUBE_HOSTS = new Set(["youtube.com", "youtu.be", "youtube-nocookie.com"]);
+
+/** آیا ورودی یک آدرس معتبر یوتیوب است؟ (پروتکل http/https و دامنه بررسی می‌شود) */
 export function isValidYoutubeUrl(input: string): boolean {
+  const value = (input ?? "").trim();
+  if (!value || value.length > 2048) return false;
+  let url: URL;
   try {
-    const u = new URL(input.trim());
-    const host = u.hostname.replace(/^www\.|^m\.|^music\./, "");
-    return ["youtube.com", "youtu.be", "youtube-nocookie.com"].includes(host);
+    url = new URL(value);
   } catch {
     return false;
   }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase().replace(/^(www|m|music)\./, "");
+  return YOUTUBE_HOSTS.has(host);
 }
 
+/** شناسه‌ی ویدئو از آدرس (برای کش، جلوگیری از دانلود تکراری و نمایش) */
+export function extractVideoId(input: string): string | null {
+  try {
+    const url = new URL(input.trim());
+    const host = url.hostname.toLowerCase().replace(/^(www|m|music)\./, "");
+    const valid = (id: string | null | undefined) => (id && /^[\w-]{6,20}$/.test(id) ? id : null);
+    if (host === "youtu.be") return valid(url.pathname.slice(1).split("/")[0]);
+    const v = url.searchParams.get("v");
+    if (v) return valid(v);
+    const match = /\/(?:shorts|embed|live|v)\/([\w-]{6,20})/.exec(url.pathname);
+    return match ? valid(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                Video info                                  */
+/* -------------------------------------------------------------------------- */
+
+const infoCache = new Map<string, { at: number; info: VideoInfo }>();
+
+function readCache(key: string): VideoInfo | null {
+  const hit = infoCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > INFO_CACHE_TTL_MS) {
+    infoCache.delete(key);
+    return null;
+  }
+  return hit.info;
+}
+
+function writeCache(key: string, info: VideoInfo) {
+  if (infoCache.size > 100) infoCache.clear();
+  infoCache.set(key, { at: Date.now(), info });
+}
+
+function audioTag(br: number): string {
+  if (br >= 320) return "بالاترین کیفیت";
+  if (br >= 192) return "کیفیت عالی";
+  if (br >= 128) return "کیفیت استاندارد";
+  return "حجم کم";
+}
+
+function buildAudioQualities(duration: number | null): AudioQuality[] {
+  return AUDIO_BITRATES.map((bitrate) => ({
+    bitrate,
+    label: `${bitrate} kbps`,
+    filesize: duration ? Math.round((bitrate * 1000 * duration) / 8) : null,
+    tag: audioTag(bitrate),
+  }));
+}
+
+function parseJsonOutput(raw: string): RawInfo {
+  const trimmed = raw.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end <= start) {
+    throw new Error("yt-dlp خروجی JSON معتبری برنگرداند");
+  }
+  try {
+    return JSON.parse(trimmed.slice(start, end + 1)) as RawInfo;
+  } catch {
+    throw new Error("تجزیه‌ی اطلاعات ویدئو ناموفق بود");
+  }
+}
+
+/** اطلاعات ویدئو را از yt-dlp می‌خواند و کیفیت‌های موجود را استخراج می‌کند */
 export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
+  const key = extractVideoId(url) ?? url;
+  const cached = readCache(key);
+  if (cached) return cached;
+
+  if (isDemoMode()) {
+    const { demoVideoInfo } = await import("@/lib/demo");
+    const fixture: VideoInfo = {
+      ...demoVideoInfo,
+      id: extractVideoId(url) ?? demoVideoInfo.id,
+      webpageUrl: url,
+      // کاور واقعی: یک فریم از کلیپ نمونه که خود اپلیکیشن با ffmpeg می‌سازد
+      thumbnail: demoMediaUrl(demoBaseUrl(), "thumbnail"),
+    };
+    writeCache(key, fixture);
+    return fixture;
+  }
+
   const bin = await getYtDlpPath();
-  const args = [...(await commonArgs()), "-J", "--skip-download", url];
-  const raw = await runCapture(bin, args);
-  const info = JSON.parse(raw) as RawInfo;
+  let raw: string;
+  try {
+    raw = await runCapture(bin, [...(await commonArgs()), "-J", "--skip-download", url], {
+      timeoutMs: INFO_TIMEOUT_MS,
+    });
+  } catch (e) {
+    throw new Error(mapYtDlpError(e instanceof Error ? e.message : String(e)));
+  }
+
+  const info = parseJsonOutput(raw);
+
+  if (info.is_live === true || info.live_status === "is_live" || info.live_status === "is_upcoming") {
+    throw new Error("پخش زنده و پریمیر پشتیبانی نمی‌شود؛ پس از پایان پخش دوباره تلاش کنید.");
+  }
 
   const formats = info.formats ?? [];
+  if (formats.length === 0) {
+    throw new Error("برای این آدرس هیچ فرمت قابل دانلودی پیدا نشد.");
+  }
 
-  // بهترین استریم صوتی برای تخمین حجم
-  const audioOnly = formats.filter(
-    (f) => (f.vcodec === "none" || !f.vcodec) && f.acodec && f.acodec !== "none",
-  );
+  // بهترین استریم صوتی برای تخمین حجم و نمایش بیت‌ریت منبع
+  const audioOnly = formats.filter((f) => (f.vcodec === "none" || !f.vcodec) && f.acodec && f.acodec !== "none");
   const bestAudio = audioOnly.sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0];
-  const bestAudioSize = bestAudio ? bestAudio.filesize ?? bestAudio.filesize_approx ?? null : null;
-  const bestAudioBitrate = bestAudio ? Math.round(bestAudio.abr ?? bestAudio.tbr ?? 0) : null;
+  const bestAudioSize = bestAudio ? (bestAudio.filesize ?? bestAudio.filesize_approx ?? null) : null;
+  const bestAudioBitrate = bestAudio ? Math.round(bestAudio.abr ?? bestAudio.tbr ?? 0) || null : null;
 
-  // گروه‌بندی کیفیت‌های ویدئویی بر اساس ارتفاع
+  // یک فرمت برای هر ارتفاع انتخاب می‌شود: اولویت mp4/H.264 و سپس بیت‌ریت بالاتر
   const byHeight = new Map<number, RawFormat>();
   for (const f of formats) {
-    if (!f.height || !f.vcodec || f.vcodec === "none") continue;
-    if (f.protocol && /m3u8/.test(f.protocol)) continue; // ترجیح فرمت‌های مستقیم
+    if (!f.height || f.height < 144 || !f.vcodec || f.vcodec === "none") continue;
+    // تصاویر «storyboard» (پیش‌نمایش صحنه‌ها) کیفیت ویدئویی نیستند
+    if (f.protocol === "mhtml" || /storyboard/i.test(f.format_note ?? "")) continue;
     const existing = byHeight.get(f.height);
-    if (!existing) {
-      byHeight.set(f.height, f);
-      continue;
-    }
-    // ترجیح: mp4 > سایر، سپس بیت‌ریت بالاتر
     const score = (x: RawFormat) =>
-      (x.ext === "mp4" ? 1000 : 0) + (x.tbr ?? 0) + (x.fps ?? 0);
-    if (score(f) > score(existing)) byHeight.set(f.height, f);
+      (x.ext === "mp4" ? 1000 : 0) + (x.vcodec?.startsWith("avc") ? 500 : 0) + (x.tbr ?? 0);
+    if (!existing || score(f) > score(existing)) byHeight.set(f.height, f);
   }
 
   const videoQualities: VideoQuality[] = [...byHeight.values()]
     .map((f) => {
-      const hasAudio = !!f.acodec && f.acodec !== "none";
+      const hasAudio = Boolean(f.acodec && f.acodec !== "none");
       const vSize = f.filesize ?? f.filesize_approx ?? null;
-      const total =
-        vSize == null ? null : hasAudio ? vSize : vSize + (bestAudioSize ?? 0);
+      const total = vSize == null ? null : hasAudio ? vSize : vSize + (bestAudioSize ?? 0);
+      const fps = f.fps ? Math.round(f.fps) : null;
       return {
         height: f.height!,
-        label: `${f.height}p${f.fps && f.fps > 30 ? Math.round(f.fps) : ""}`,
-        fps: f.fps ? Math.round(f.fps) : null,
+        label: `${f.height}p${fps && fps > 30 ? fps : ""}`,
+        fps,
+        // خروجی نهایی همیشه MP4 است (به‌خاطر `--merge-output-format mp4`)
         ext: "mp4",
         vcodec: f.vcodec ?? null,
         filesize: total,
@@ -281,75 +268,73 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
     })
     .sort((a, b) => b.height - a.height);
 
-  const duration = info.duration ?? null;
-  const audioQualities: AudioQuality[] = MP3_BITRATES.map((br) => ({
-    bitrate: br,
-    label: `${br} kbps`,
-    filesize: duration ? Math.round((br * 1000 * duration) / 8) : null,
-    tag:
-      br >= 320
-        ? "بالاترین کیفیت"
-        : br >= 192
-          ? "کیفیت عالی"
-          : br >= 128
-            ? "کیفیت استاندارد"
-            : "حجم کم",
-  }));
-
+  const duration = typeof info.duration === "number" ? info.duration : null;
   const thumb =
     info.thumbnail ??
-    (info.thumbnails && info.thumbnails.length
-      ? info.thumbnails[info.thumbnails.length - 1].url
-      : null);
+    (info.thumbnails?.length ? info.thumbnails[info.thumbnails.length - 1].url : null) ??
+    null;
 
-  return {
-    id: info.id,
-    title: info.title,
-    thumbnail: thumb ?? null,
+  const result: VideoInfo = {
+    id: info.id ?? key,
+    title: info.title?.trim() || "بدون عنوان",
+    thumbnail: thumb,
     duration,
     uploader: info.uploader ?? info.channel ?? null,
     viewCount: info.view_count ?? null,
     webpageUrl: info.webpage_url ?? url,
     videoQualities,
-    audioQualities,
+    audioQualities: buildAudioQualities(duration),
     sourceAudioBitrate: bestAudioBitrate,
   };
+
+  writeCache(key, result);
+  return result;
 }
 
 /* -------------------------------------------------------------------------- */
 /*                               Download engine                              */
 /* -------------------------------------------------------------------------- */
 
-export const DOWNLOAD_ROOT = path.join(/* turbopackIgnore: true */ os.tmpdir(), "yt-downloader-jobs");
+/** فرایندهای در حال اجرا (برای امکان لغو) */
+const activeProcesses = new Map<string, ChildProcess>();
+/** jobهایی که کاربر لغو کرده است */
+const cancelledJobs = new Set<string>();
 
-/** فرایندهای yt-dlp در حال اجرا (برای امکان لغو دانلود) */
-const activeProcesses = new Map<string, ReturnType<typeof spawn>>();
-
-/**
- * لغو یک دانلود در حال اجرا. اگر jobی با این شناسه در حال دانلود نباشد، false برمی‌گرداند.
- * ابتدا SIGTERM می‌فرستد و اگر فرایند پس از چند ثانیه تمام نشد، SIGKILL.
- */
-export function cancelDownload(jobId: string): boolean {
-  const child = activeProcesses.get(jobId);
-  if (!child || !child.pid) return false;
+function killTree(child: ChildProcess, signal: NodeJS.Signals) {
   try {
-    child.kill("SIGTERM");
+    if (process.platform !== "win32" && child.pid) {
+      // با detached شدن فرایند، کشتن گروه، فرزندانِ ffmpeg را هم متوقف می‌کند
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+    /* گروه فرایند دیگر وجود ندارد؛ مستقیم امتحان می‌کنیم */
+  }
+  try {
+    child.kill(signal);
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * لغو یک دانلود در حال اجرا. ابتدا SIGTERM و در صورت نیاز بعد از ۳ ثانیه SIGKILL.
+ * اگر jobی در حال دانلود نباشد `false` برمی‌گردد.
+ */
+export function cancelDownload(jobId: string): boolean {
+  const child = activeProcesses.get(jobId);
+  if (!child?.pid) return false;
+  cancelledJobs.add(jobId);
+  killTree(child, "SIGTERM");
   const timer = setTimeout(() => {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      /* ignore */
-    }
+    if (activeProcesses.has(jobId)) killTree(child, "SIGKILL");
   }, 3000);
   timer.unref?.();
   return true;
 }
 
 export interface DownloadHandlers {
-  onProgress: (progress: number, status: "downloading" | "processing") => void;
+  onProgress: (metrics: ProgressMetrics) => void;
   onDone: (filePath: string, fileSize: number) => void;
   onError: (message: string) => void;
   onCancelled: () => void;
@@ -358,177 +343,116 @@ export interface DownloadHandlers {
 export interface DownloadRequest {
   jobId: string;
   url: string;
-  kind: "video" | "audio";
+  kind: DownloadKind;
   /** برای ویدئو: ارتفاع (مثلاً 1080)؛ برای صدا: بیت‌ریت (مثلاً 320) */
   quality: number;
+  /** در حالت نمایشی: آدرس نمونه‌ی محلی به‌جای یوتیوب */
+  demo?: boolean;
 }
 
-export function sanitizeFileName(name: string): string {
-  return (
-    name
-      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 120) || "download"
-  );
+/** آرگومان‌های مشترک (کشف مسیرها و قابلیت‌ها در هر بار اجرا کش می‌شود) */
+async function commonArgs(): Promise<string[]> {
+  const capabilities = await getYtDlpCapabilities();
+  const configuredRemote = process.env.YTDLP_REMOTE_COMPONENTS?.trim();
+  return buildCommonArgs({
+    capabilities,
+    nodePath: process.execPath,
+    ffmpegPath: getFfmpegPath(),
+    cookiesFile: process.env.YTDLP_COOKIES_FILE?.trim() || null,
+    proxy: process.env.YTDLP_PROXY?.trim() || null,
+    extraArgs: process.env.YTDLP_EXTRA_ARGS?.trim() || null,
+    cacheDir: YTDLP_CACHE_DIR,
+    // باینری‌های pip ماژول حل چالش JS را همراه ندارند و باید از راه دور دریافت شود.
+    remoteComponents: configuredRemote ?? (capabilities.isSelfContained ? null : "ejs:github"),
+  });
 }
+
+/** حداکثر حجمی که از stderr نگه می‌داریم (برای پیام خطا) */
+const MAX_STDERR = 16_384;
 
 /**
- * یک دانلود را در پس‌زمینه اجرا می‌کند و پیشرفت را از طریق handlers گزارش می‌دهد.
+ * یک دانلود را در پس‌زمینه اجرا می‌کند و رخدادها را از طریق `handlers` گزارش می‌دهد.
  */
-export async function runDownload(req: DownloadRequest, handlers: DownloadHandlers) {
+export async function runDownload(req: DownloadRequest, handlers: DownloadHandlers): Promise<void> {
   const bin = await getYtDlpPath();
-  const dir = `${DOWNLOAD_ROOT}${path.sep}${req.jobId}`;
+  const dir = jobDir(req.jobId);
   await fsp.mkdir(dir, { recursive: true });
 
-  const outTemplate = `${dir}${path.sep}output.%(ext)s`;
-  const args = [...(await commonArgs()), "--newline", "--progress", "-o", outTemplate];
+  const outTemplate = path.join(/* turbopackIgnore: true */ dir, "output.%(ext)s");
+  const args = [
+    ...(await commonArgs()),
+    ...buildDownloadArgs({ kind: req.kind, quality: req.quality, outTemplate }),
+  ];
 
-  if (req.kind === "video") {
-    const h = req.quality;
-    args.push(
-      "-f",
-      [
-        // اولویت با H.264 (بیشترین سازگاری)، سپس هر mp4، سپس هر چیزی
-        `bestvideo[height<=${h}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]`,
-        `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]`,
-        `bestvideo[height<=${h}]+bestaudio`,
-        `best[height<=${h}]`,
-        "best",
-      ].join("/"),
-      "--merge-output-format",
-      "mp4",
-      // برای سازگاری با اکثر پلیرها
-      "--postprocessor-args",
-      "Merger:-movflags +faststart",
-    );
-  } else {
-    args.push(
-      "-f",
-      "bestaudio/best",
-      "-x",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      `${req.quality}K`,
-      "--embed-thumbnail",
-      "--add-metadata",
-    );
+  const tracker = new DownloadProgressTracker(req.kind);
+  let url = req.url;
+  if (req.demo || isDemoMode()) {
+    // در حالت نمایشی، منبع دانلود همان کلیپ نمونه‌ی محلی است و سرعت آن محدود
+    // می‌شود تا نوار پیشرفت (مثل دانلود واقعی) قابل مشاهده باشد.
+    const kind = req.kind === "video" ? "video" : "audio";
+    await ensureDemoMedia(kind);
+    url = demoMediaUrl(demoBaseUrl(), kind);
+    const limit = process.env.DEMO_LIMIT_RATE?.trim() || "1500K";
+    if (limit !== "0") args.push("--limit-rate", limit);
   }
+  args.push(url);
 
-  args.push(req.url);
-
-  const child = spawn(/* turbopackIgnore: true */ bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(/* turbopackIgnore: true */ bin, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
   activeProcesses.set(req.jobId, child);
+
   let stderr = "";
-  let lastProgress = 0;
-  let downloadPhase = 0; // برای دانلودهای چندبخشی (ویدئو + صدا)
-  let phaseCount = req.kind === "video" ? 2 : 1;
-
   const handleLine = (line: string) => {
-    const l = line.trim();
-    if (!l) return;
-
-    // [download]  45.3% of 12.34MiB at 1.2MiB/s ETA 00:05
-    const m = /^\[download\]\s+([\d.]+)%/.exec(l);
-    if (m) {
-      const pct = parseFloat(m[1]);
-      if (pct === 100 && lastProgress < 100) {
-        // پایان یک بخش
-      }
-      let overall: number;
-      if (req.kind === "video") {
-        overall = Math.round((downloadPhase * 100 + pct) / phaseCount);
-      } else {
-        overall = Math.round(pct * 0.9);
-      }
-      overall = Math.min(overall, 95);
-      if (overall !== lastProgress) {
-        lastProgress = overall;
-        handlers.onProgress(overall, "downloading");
-      }
-      if (pct >= 100) downloadPhase = Math.min(downloadPhase + 1, phaseCount - 1);
-      return;
-    }
-    if (/^\[download\] Destination:/.test(l) && req.kind === "video") {
-      // آغاز یک بخش جدید
-      return;
-    }
-    if (/has already been downloaded/.test(l)) {
-      downloadPhase = Math.min(downloadPhase + 1, phaseCount - 1);
-      return;
-    }
-    if (/^\[(Merger|ExtractAudio|Metadata|EmbedThumbnail|ffmpeg|FixupM3u8)\]/i.test(l)) {
-      handlers.onProgress(Math.max(lastProgress, 96), "processing");
-      return;
-    }
-    if (/^\[info\].*format\(s\)/.test(l)) {
-      // e.g. "[info] xyz: Downloading 1 format(s): 137+140"
-      const fm = /Downloading (\d+) format/.exec(l);
-      if (fm) phaseCount = Math.max(1, parseInt(fm[1], 10));
-    }
+    const metrics = tracker.handleLine(line);
+    if (metrics) handlers.onProgress(metrics);
   };
 
-  let buf = "";
-  child.stdout.on("data", (d) => {
-    buf += d.toString();
-    const parts = buf.split(/\r?\n/);
-    buf = parts.pop() ?? "";
+  let buffer = "";
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk.toString();
+    const parts = buffer.split(/\r?\n/);
+    buffer = parts.pop() ?? "";
     parts.forEach(handleLine);
   });
-  child.stderr.on("data", (d) => {
-    const s = d.toString();
-    stderr += s;
-    s.split(/\r?\n/).forEach(handleLine);
+  child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    stderr = (stderr + text).slice(-MAX_STDERR);
+    text.split(/\r?\n/).forEach(handleLine);
   });
 
-  let signalReceived = false;
-  child.on("error", (e) => {
+  child.on("error", (error) => {
     activeProcesses.delete(req.jobId);
-    handlers.onError(e.message);
+    handlers.onError(mapYtDlpError(error.message));
   });
+
   child.on("close", async (code, signal) => {
     activeProcesses.delete(req.jobId);
-    // اگر فرایند با سیگنال کشته شد یا پس از درخواست لغو با خطا متوقف شد، «لغو» ثبت می‌کنیم.
-    const cancelled = signal !== null || (signalReceived && code !== 0);
+    const cancelled = cancelledJobs.delete(req.jobId) || signal !== null;
     if (cancelled) {
       await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
       handlers.onCancelled();
       return;
     }
     if (code !== 0) {
-      handlers.onError(cleanError(stderr) || `yt-dlp exited with code ${code}`);
+      handlers.onError(mapYtDlpError(stderr) || `yt-dlp با کد ${code} خارج شد`);
       return;
     }
     try {
-      const wantedExt = req.kind === "video" ? ".mp4" : ".mp3";
       const files = await fsp.readdir(dir);
-      let file = files.find((f) => f.toLowerCase().endsWith(wantedExt));
-      if (!file) {
-        // در صورت عدم ادغام، هر خروجی معتبری را می‌پذیریم
-        file = files.find((f) => f.startsWith("output.") && !/\.(part|ytdl|webp|jpg|png)$/.test(f));
-      }
-      if (!file) throw new Error("فایل خروجی پیدا نشد");
-      const full = `${dir}${path.sep}${file}`;
+      const file = pickOutputFile(files, req.kind);
+      if (!file) throw new Error("فایل خروجی دانلود پیدا نشد");
+      const full = path.join(/* turbopackIgnore: true */ dir, file);
       const stat = await fsp.stat(full);
       handlers.onDone(full, stat.size);
     } catch (e) {
-      handlers.onError(e instanceof Error ? e.message : String(e));
+      handlers.onError(cleanYtDlpError(stderr) || (e instanceof Error ? e.message : String(e)));
     }
   });
-
-  // «لغو» را با نشانه‌گذاری پیگیری می‌کنیم تا از گزارش خطا جلوگیری شود.
-  const originalKill = child.kill.bind(child);
-  child.kill = (sig?: NodeJS.Signals | number) => {
-    signalReceived = true;
-    return originalKill(sig);
-  };
-
-  return child;
 }
 
-/** حذف پوشه یک job (پس از انقضا) */
-export async function removeJobDir(jobId: string) {
-  const dir = `${DOWNLOAD_ROOT}${path.sep}${jobId}`;
-  await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+/** حذف پوشه‌ی یک job (پس از انقضا یا لغو) */
+export async function removeJobDir(jobId: string): Promise<void> {
+  await fsp.rm(jobDir(jobId), { recursive: true, force: true }).catch(() => {});
 }

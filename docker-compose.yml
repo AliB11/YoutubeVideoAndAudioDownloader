@@ -22,6 +22,10 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/app_db
       FILE_TTL_MINUTES: "120"
+      MAX_CONCURRENT_DOWNLOADS: "3"
+      RATE_LIMIT_PER_MINUTE: "30"
+      # در محیط‌هایی که به یوتیوب دسترسی ندارند، برای نمایش رابط کاربری: "1"
+      DEMO_MODE: "0"
       # YTDLP_COOKIES_FILE: /app/cookies.txt
       # YTDLP_PROXY: socks5://host.docker.internal:1080
     # volumes:
@@ -29,6 +33,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   pgdata:

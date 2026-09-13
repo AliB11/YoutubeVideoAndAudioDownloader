@@ -29,11 +29,12 @@ export function formatViews(n: number | null | undefined): string {
 
 export function formatRelative(date: string | Date): string {
   const d = typeof date === "string" ? new Date(date) : date;
-  const diff = (Date.now() - d.getTime()) / 1000;
-  if (diff < 60) return "چند لحظه پیش";
-  if (diff < 3600) return `${Math.floor(diff / 60)} دقیقه پیش`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} ساعت پیش`;
-  return `${Math.floor(diff / 86400)} روز پیش`;
+  const seconds = (Date.now() - d.getTime()) / 1000;
+  if (!Number.isFinite(seconds)) return "—";
+  if (seconds < 60) return "چند لحظه پیش";
+  if (seconds < 3600) return `${faNum(Math.floor(seconds / 60))} دقیقه پیش`;
+  if (seconds < 86400) return `${faNum(Math.floor(seconds / 3600))} ساعت پیش`;
+  return `${faNum(Math.floor(seconds / 86400))} روز پیش`;
 }
 
 const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";

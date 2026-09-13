@@ -3,7 +3,7 @@ import { cancelJob, deleteJob, getJob, toPublicJob } from "@/lib/jobs";
 
 export const dynamic = "force-dynamic";
 
-/** وضعیت لحظه‌ای یک job (برای polling از سمت کلاینت) */
+/** GET /api/jobs/:jobId — وضعیت لحظه‌ای یک دانلود (برای polling از سمت کلاینت) */
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> },
@@ -17,9 +17,9 @@ export async function GET(
 }
 
 /**
- * حذف یک job:
- * - اگر هنوز در حال دانلود باشد، ابتدا لغو و سپس حذف می‌شود.
- * - query پارامتر `cancel=1` یعنی فقط لغو بدون حذف از تاریخچه.
+ * DELETE /api/jobs/:jobId
+ * - `?cancel=1`: فقط لغو دانلود (رکورد در تاریخچه می‌ماند).
+ * - بدون پارامتر: حذف کامل رکورد و فایل‌های آن.
  */
 export async function DELETE(
   req: NextRequest,

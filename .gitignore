@@ -21,3 +21,13 @@ npm-debug.log*
 # misc
 .DS_Store
 *.tsbuildinfo
+
+# خروجی‌های ساخت بسته‌ی ویندوز (نصب‌کننده/زیپ/فایل‌های میانی)
+packaging/windows/dist/
+
+# باینری‌هایی که در زمان ساخت دانلود می‌شوند و نباید در مخزن باشند
+packaging/windows/assets/yt-dlp.exe
+packaging/windows/assets/ffmpeg.exe
+
+# گزارش‌های موقت CI
+.ci/

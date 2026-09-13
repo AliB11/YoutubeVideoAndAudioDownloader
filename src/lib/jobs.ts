@@ -3,36 +3,60 @@ import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { db, isDbConfigured } from "@/db";
 import { downloads, type Download } from "@/db/schema";
 import {
+  AUDIO_BITRATES,
   cancelDownload,
   removeJobDir,
   runDownload,
   sanitizeFileName,
+  type DownloadKind,
+  type DownloadRequest,
   type VideoInfo,
 } from "@/lib/ytdlp";
 
 /** مدت نگهداری فایل‌های دانلودشده روی سرور (میلی‌ثانیه) */
 const FILE_TTL_MS = Number(process.env.FILE_TTL_MINUTES ?? 120) * 60 * 1000;
+/** حداکثر دانلود هم‌زمان (بقیه در صف می‌مانند تا منابع سرور اشباع نشود) */
+const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT_DOWNLOADS ?? 3));
+
+/** زمان راه‌اندازی این نسخه از سرور؛ برای تشخیص jobهای نیمه‌کاره‌ی قبل از ری‌استارت */
+const BOOT_TIME = Date.now();
+
+type JobStatus = Download["status"];
 
 interface LiveJob {
   progress: number;
-  status: Download["status"];
+  status: JobStatus;
+  speed: string | null;
+  eta: string | null;
+  downloadedBytes: number | null;
+  totalBytes: number | null;
   lastDbWrite: number;
 }
 
 const globalForJobs = globalThis as typeof globalThis & {
   __ytLiveJobs?: Map<string, LiveJob>;
   __ytMemJobs?: Map<string, Download>;
+  __ytJobRequests?: Map<string, DownloadRequest>;
+  __ytQueue?: string[];
+  __ytRunning?: Set<string>;
   __ytCleanupTimer?: NodeJS.Timeout;
   __ytDbWarns?: Set<string>;
+  __ytInitialized?: boolean;
 };
 
 const liveJobs = (globalForJobs.__ytLiveJobs ??= new Map<string, LiveJob>());
 /**
  * نگه‌داری کامل jobها در حافظه:
- * ۱) برای گزارش پیشرفت زنده بدون نیاز به خواندن دیتابیس
- * ۲) به‌عنوان fallback وقتی PostgreSQL در دسترس نیست (تاریخچه ذخیره نمی‌شود اما دانلود کار می‌کند)
+ * ۱) برای گزارش پیشرفت زنده بدون خواندن دیتابیس
+ * ۲) به‌عنوان fallback وقتی PostgreSQL در دسترس نیست
  */
 const memJobs = (globalForJobs.__ytMemJobs ??= new Map<string, Download>());
+/** پارامترهای دانلود jobهای همین نسخه از سرور (برای اجرای صف) */
+const jobRequests = (globalForJobs.__ytJobRequests ??= new Map<string, DownloadRequest>());
+/** صف انتظار برای اجرا */
+const queue = (globalForJobs.__ytQueue ??= []);
+/** jobهای در حال اجرا */
+const running = (globalForJobs.__ytRunning ??= new Set<string>());
 
 function warnOnce(key: string, msg: string) {
   const warned = (globalForJobs.__ytDbWarns ??= new Set<string>());
@@ -42,26 +66,64 @@ function warnOnce(key: string, msg: string) {
   }
 }
 
-function ensureCleanupTimer() {
-  if (globalForJobs.__ytCleanupTimer) return;
-  globalForJobs.__ytCleanupTimer = setInterval(() => {
-    cleanupExpired().catch((e) => console.error("[jobs] cleanup failed", e));
-  }, 5 * 60 * 1000);
-  globalForJobs.__ytCleanupTimer.unref?.();
+/* -------------------------------------------------------------------------- */
+/*                            راه‌اندازی و پاک‌سازی                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * در اولین استفاده: jobهایی که پیش از ری‌استارت سرور در حال دانلود بوده‌اند
+ * به‌عنوان خطا علامت می‌خورند (چون فرایند yt-dlp آن‌ها دیگر وجود ندارد) و
+ * تایمر پاک‌سازی دوره‌ای راه می‌افتد.
+ */
+export async function ensureInitialized(): Promise<void> {
+  if (!globalForJobs.__ytCleanupTimer) {
+    globalForJobs.__ytCleanupTimer = setInterval(() => {
+      cleanupExpired().catch((e) => console.error("[jobs] cleanup failed", e));
+    }, 5 * 60 * 1000);
+    globalForJobs.__ytCleanupTimer.unref?.();
+  }
+  if (globalForJobs.__ytInitialized) return;
+  globalForJobs.__ytInitialized = true;
+
+  if (!isDbConfigured) return;
+  try {
+    const stale = await db
+      .select({ jobId: downloads.jobId })
+      .from(downloads)
+      .where(
+        and(
+          inArray(downloads.status, ["pending", "downloading", "processing"]),
+          lt(downloads.createdAt, new Date(BOOT_TIME)),
+        ),
+      );
+    if (stale.length === 0) return;
+    await db
+      .update(downloads)
+      .set({
+        status: "error",
+        error: "سرور پیش از پایان دانلود راه‌اندازی مجدد شد؛ لطفاً دوباره تلاش کنید.",
+        completedAt: new Date(),
+      })
+      .where(inArray(downloads.jobId, stale.map((s) => s.jobId)));
+    for (const row of stale) await removeJobDir(row.jobId);
+    console.log(`[jobs] ${stale.length} job نیمه‌کاره از اجرای قبلی علامت‌گذاری شد`);
+  } catch (e) {
+    warnOnce("reconcile", `[jobs] reconcile failed: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
-export async function cleanupExpired() {
+export async function cleanupExpired(): Promise<void> {
   const cutoffMs = Date.now() - FILE_TTL_MS;
   const cutoff = new Date(cutoffMs);
 
   // پاک‌سازی رکوردهای داخل حافظه (فایل + وضعیت)
   for (const [jobId, job] of memJobs) {
-    const finished =
-      job.status === "done" || job.status === "error" || job.status === "cancelled";
+    const finished = job.status === "done" || job.status === "error" || job.status === "cancelled";
     if (finished && job.createdAt.getTime() < cutoffMs) {
       await removeJobDir(jobId);
       memJobs.delete(jobId);
       liveJobs.delete(jobId);
+      jobRequests.delete(jobId);
     }
   }
 
@@ -72,10 +134,7 @@ export async function cleanupExpired() {
       .select({ id: downloads.id, jobId: downloads.jobId })
       .from(downloads)
       .where(
-        and(
-          lt(downloads.createdAt, cutoff),
-          inArray(downloads.status, ["done", "error", "cancelled"]),
-        ),
+        and(lt(downloads.createdAt, cutoff), inArray(downloads.status, ["done", "error", "cancelled"])),
       );
 
     for (const row of expired) {
@@ -87,36 +146,41 @@ export async function cleanupExpired() {
       await db
         .update(downloads)
         .set({ filePath: null, status: "expired" })
-        .where(
-          inArray(
-            downloads.id,
-            expired.map((r) => r.id),
-          ),
-        );
+        .where(inArray(downloads.id, expired.map((r) => r.id)));
     }
   } catch (e) {
     warnOnce("cleanup", `[jobs] cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                  ساخت job                                  */
+/* -------------------------------------------------------------------------- */
+
 export interface CreateJobInput {
   url: string;
-  kind: "video" | "audio";
+  kind: DownloadKind;
   quality: number;
   info: Pick<VideoInfo, "id" | "title" | "thumbnail" | "uploader" | "duration">;
 }
 
 type JobPatch = Partial<
-  Pick<Download, "progress" | "status" | "filePath" | "fileSize" | "error" | "completedAt">
+  Pick<
+    Download,
+    "progress" | "status" | "filePath" | "fileSize" | "error" | "completedAt"
+  >
 >;
 
-function buildFileName(title: string | null | undefined, qualityLabel: string, ext: string) {
-  const safeTitle = sanitizeFileName(title ?? "download");
-  return `${safeTitle} [${qualityLabel}].${ext}`;
+function qualityLabel(kind: DownloadKind, quality: number): string {
+  return kind === "video" ? `${quality}p` : `${quality}kbps`;
+}
+
+function buildFileName(title: string | null | undefined, label: string, ext: string): string {
+  return `${sanitizeFileName(title ?? "download")} [${label}].${ext}`;
 }
 
 /** به‌روزرسانی حافظه و (در صورت وجود دیتابیس) ذخیره‌ی ماندگار */
-async function persist(jobId: string, patch: JobPatch) {
+async function persist(jobId: string, patch: JobPatch): Promise<void> {
   const cur = memJobs.get(jobId);
   if (cur) memJobs.set(jobId, { ...cur, ...patch });
 
@@ -128,12 +192,36 @@ async function persist(jobId: string, patch: JobPatch) {
   }
 }
 
-export async function createJob(input: CreateJobInput): Promise<Download> {
-  ensureCleanupTimer();
+function isActiveStatus(status: JobStatus): boolean {
+  return status === "pending" || status === "downloading" || status === "processing";
+}
+
+/** آیا دانلودی با همین مشخصات در حال اجرا/صف است؟ (برای جلوگیری از دانلود تکراری) */
+export function findActiveDuplicate(
+  url: string,
+  kind: DownloadKind,
+  quality: string,
+): Download | null {
+  for (const job of memJobs.values()) {
+    const live = liveJobs.get(job.jobId);
+    const status = live?.status ?? job.status;
+    if (isActiveStatus(status) && job.url === url && job.kind === kind && job.quality === quality) {
+      return job;
+    }
+  }
+  return null;
+}
+
+export async function createJob(input: CreateJobInput): Promise<{ job: Download; reused: boolean }> {
+  await ensureInitialized();
+
+  const label = qualityLabel(input.kind, input.quality);
+  const duplicate = findActiveDuplicate(input.url, input.kind, label);
+  if (duplicate) return { job: mergeLive(duplicate), reused: true };
+
   const jobId = randomUUID();
-  const qualityLabel = input.kind === "video" ? `${input.quality}p` : `${input.quality}kbps`;
   const ext = input.kind === "video" ? "mp4" : "mp3";
-  const fileName = buildFileName(input.info.title, qualityLabel, ext);
+  const fileName = buildFileName(input.info.title, label, ext);
 
   const values = {
     jobId,
@@ -144,8 +232,8 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
     uploader: input.info.uploader,
     duration: input.info.duration ?? null,
     kind: input.kind,
-    quality: qualityLabel,
-    status: "downloading",
+    quality: label,
+    status: "pending" as JobStatus,
     progress: 0,
     fileName,
   };
@@ -160,8 +248,8 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
     }
   }
 
-  // اگر دیتابیس در دسترس نبود، یک رکورد در حافظه می‌سازیم تا دانلود همچنان کار کند
   if (!row) {
+    // بدون دیتابیس هم دانلود کار می‌کند؛ فقط تاریخچه ماندگار نیست.
     row = {
       ...values,
       id: 0,
@@ -174,69 +262,165 @@ export async function createJob(input: CreateJobInput): Promise<Download> {
   }
 
   memJobs.set(jobId, row);
-  liveJobs.set(jobId, { progress: 0, status: "downloading", lastDbWrite: 0 });
+  liveJobs.set(jobId, {
+    progress: 0,
+    status: "pending",
+    speed: null,
+    eta: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    lastDbWrite: 0,
+  });
+  jobRequests.set(jobId, {
+    jobId,
+    url: input.url,
+    kind: input.kind,
+    quality: input.quality,
+  });
 
-  runDownload(
-    { jobId, url: input.url, kind: input.kind, quality: input.quality },
-    {
-      onProgress: (progress, status) => {
-        const live = liveJobs.get(jobId);
-        if (!live) return;
-        live.progress = progress;
-        live.status = status;
+  if (running.size < MAX_CONCURRENT) {
+    void startJob(jobId);
+  } else {
+    queue.push(jobId);
+  }
+
+  return { job: mergeLive(row), reused: false };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                اجرای صف                                    */
+/* -------------------------------------------------------------------------- */
+
+async function startNext(): Promise<void> {
+  while (running.size < MAX_CONCURRENT && queue.length > 0) {
+    const next = queue.shift()!;
+    if (!jobRequests.has(next)) continue;
+    const live = liveJobs.get(next);
+    if (live?.status === "cancelled") continue;
+    void startJob(next);
+  }
+}
+
+async function startJob(jobId: string): Promise<void> {
+  const request = jobRequests.get(jobId);
+  if (!request) return;
+  if (running.has(jobId)) return;
+
+  const live = liveJobs.get(jobId);
+  if (live?.status === "cancelled") return;
+
+  running.add(jobId);
+  liveJobs.set(jobId, {
+    progress: 0,
+    status: "downloading",
+    speed: null,
+    eta: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    lastDbWrite: Date.now(),
+  });
+  await persist(jobId, { status: "downloading", progress: 0 });
+
+  try {
+    await runDownload(request, {
+      onProgress: (metrics) => {
+        const state = liveJobs.get(jobId);
+        if (!state) return;
+        state.progress = metrics.percent;
+        state.status = metrics.phase;
+        state.speed = metrics.speed ?? null;
+        state.eta = metrics.eta ?? null;
+        state.downloadedBytes = metrics.downloadedBytes ?? null;
+        state.totalBytes = metrics.totalBytes ?? null;
         const now = Date.now();
-        if (now - live.lastDbWrite > 1500) {
-          live.lastDbWrite = now;
-          void persist(jobId, { progress, status });
+        if (now - state.lastDbWrite > 1500) {
+          state.lastDbWrite = now;
+          void persist(jobId, { progress: metrics.percent, status: metrics.phase });
         }
       },
       onDone: (filePath, fileSize) => {
-        liveJobs.set(jobId, { progress: 100, status: "done", lastDbWrite: Date.now() });
+        liveJobs.set(jobId, {
+          progress: 100,
+          status: "done",
+          speed: null,
+          eta: null,
+          downloadedBytes: fileSize,
+          totalBytes: fileSize,
+          lastDbWrite: Date.now(),
+        });
         void persist(jobId, {
           progress: 100,
           status: "done",
           filePath,
           fileSize,
-          completedAt: new Date(),
-        });
-      },
-      onError: (message) => {
-        liveJobs.set(jobId, { progress: 0, status: "error", lastDbWrite: Date.now() });
-        void persist(jobId, { status: "error", error: message, completedAt: new Date() });
-      },
-      onCancelled: () => {
-        liveJobs.set(jobId, { progress: 0, status: "cancelled", lastDbWrite: Date.now() });
-        void persist(jobId, {
-          status: "cancelled",
           error: null,
           completedAt: new Date(),
         });
       },
-    },
-  ).catch((e) => {
+      onError: (message) => {
+        liveJobs.set(jobId, {
+          progress: 0,
+          status: "error",
+          speed: null,
+          eta: null,
+          downloadedBytes: null,
+          totalBytes: null,
+          lastDbWrite: Date.now(),
+        });
+        void persist(jobId, { status: "error", error: message, completedAt: new Date() });
+      },
+      onCancelled: () => {
+        liveJobs.set(jobId, {
+          progress: 0,
+          status: "cancelled",
+          speed: null,
+          eta: null,
+          downloadedBytes: null,
+          totalBytes: null,
+          lastDbWrite: Date.now(),
+        });
+        void persist(jobId, { status: "cancelled", error: null, completedAt: new Date() });
+      },
+    });
+  } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    liveJobs.set(jobId, { progress: 0, status: "error", lastDbWrite: Date.now() });
-    void persist(jobId, { status: "error", error: message, completedAt: new Date() });
-  });
+    liveJobs.set(jobId, {
+      progress: 0,
+      status: "error",
+      speed: null,
+      eta: null,
+      downloadedBytes: null,
+      totalBytes: null,
+      lastDbWrite: Date.now(),
+    });
+    await persist(jobId, { status: "error", error: message, completedAt: new Date() });
+  } finally {
+    running.delete(jobId);
+    void startNext();
+  }
+}
 
-  return row;
+/* -------------------------------------------------------------------------- */
+/*                              خواندن وضعیت                                  */
+/* -------------------------------------------------------------------------- */
+
+/** ادغام اطلاعات زنده‌ی حافظه (پیشرفت/سرعت/وضعیت) با رکورد دیتابیس */
+function mergeLive(row: Download): Download {
+  const live = liveJobs.get(row.jobId);
+  if (!live) return row;
+  if (row.status === "done" || row.status === "error" || row.status === "expired") return row;
+  return { ...row, progress: live.progress, status: live.status };
 }
 
 export async function getJob(jobId: string): Promise<Download | null> {
+  await ensureInitialized();
   const mem = memJobs.get(jobId);
-  const live = liveJobs.get(jobId);
-  if (mem) {
-    if (live && mem.status !== "done" && mem.status !== "error") {
-      return { ...mem, progress: live.progress, status: live.status };
-    }
-    return mem;
-  }
+  if (mem) return mergeLive(mem);
 
   if (!isDbConfigured) return null;
-
   try {
     const [row] = await db.select().from(downloads).where(eq(downloads.jobId, jobId)).limit(1);
-    return row ?? null;
+    return row ? mergeLive(row) : null;
   } catch (e) {
     warnOnce("get", `[jobs] db select failed: ${e instanceof Error ? e.message : e}`);
     return null;
@@ -244,8 +428,8 @@ export async function getJob(jobId: string): Promise<Download | null> {
 }
 
 /**
- * لغو یک دانلودِ در حال اجرا. تنها jobهایی که هنوز در حال دانلود/پردازش هستند
- * قابل لغو هستند. خروجی مقدار خطا (به‌فارسی) یا null در صورت موفقیت است.
+ * لغو یک دانلود (در حال اجرا یا در صف).
+ * خروجی: پیام خطا (فارسی) یا `null` در صورت موفقیت.
  */
 export async function cancelJob(jobId: string): Promise<string | null> {
   const job = await getJob(jobId);
@@ -255,9 +439,23 @@ export async function cancelJob(jobId: string): Promise<string | null> {
   if (job.status === "cancelled") return "این دانلود قبلاً لغو شده است";
   if (job.status === "expired") return "این دانلود منقضی شده است";
 
-  // اگر فرایند فعالی وجود داشت، آن را متوقف می‌کنیم (تکمیل لغو توسط onCancelled انجام می‌شود)
+  // اگر در صف است، فقط از صف حذف می‌شود
+  const queueIndex = queue.indexOf(jobId);
+  if (queueIndex >= 0) queue.splice(queueIndex, 1);
+
+  // اگر فرایند فعالی وجود دارد، متوقف می‌شود (تکمیل لغو توسط onCancelled انجام می‌شود)
   cancelDownload(jobId);
-  liveJobs.set(jobId, { progress: 0, status: "cancelled", lastDbWrite: Date.now() });
+
+  liveJobs.set(jobId, {
+    progress: 0,
+    status: "cancelled",
+    speed: null,
+    eta: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    lastDbWrite: Date.now(),
+  });
+  jobRequests.delete(jobId);
   await persist(jobId, { status: "cancelled", error: null, completedAt: new Date() });
   await removeJobDir(jobId);
   return null;
@@ -265,12 +463,17 @@ export async function cancelJob(jobId: string): Promise<string | null> {
 
 /** حذف کامل یک دانلود از تاریخچه و پاک‌کردن فایل‌های آن */
 export async function deleteJob(jobId: string): Promise<boolean> {
+  await ensureInitialized();
   const job = await getJob(jobId);
   if (!job) return false;
+
+  const queueIndex = queue.indexOf(jobId);
+  if (queueIndex >= 0) queue.splice(queueIndex, 1);
 
   cancelDownload(jobId);
   liveJobs.delete(jobId);
   memJobs.delete(jobId);
+  jobRequests.delete(jobId);
   await removeJobDir(jobId);
 
   if (isDbConfigured) {
@@ -285,40 +488,90 @@ export async function deleteJob(jobId: string): Promise<boolean> {
 
 /** فهرست آخرین دانلودها (تاریخچه) — از دیتابیس یا در نبود آن از حافظه */
 export async function listJobs(limit = 30): Promise<Download[]> {
+  await ensureInitialized();
   if (isDbConfigured) {
     try {
-      return await db
-        .select()
-        .from(downloads)
-        .orderBy(desc(downloads.createdAt))
-        .limit(limit);
+      const rows = await db.select().from(downloads).orderBy(desc(downloads.createdAt)).limit(limit);
+      return rows.map(mergeLive);
     } catch (e) {
       warnOnce("select", `[jobs] db select failed: ${e instanceof Error ? e.message : e}`);
     }
   }
   return [...memJobs.values()]
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .slice(0, limit);
+    .slice(0, limit)
+    .map(mergeLive);
 }
 
-export function toPublicJob(row: Download) {
+/* -------------------------------------------------------------------------- */
+/*                              خروجی عمومی                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface PublicJob {
+  jobId: string;
+  videoId: string | null;
+  title: string | null;
+  thumbnail: string | null;
+  uploader: string | null;
+  duration: number | null;
+  kind: string;
+  quality: string;
+  status: JobStatus;
+  progress: number;
+  fileName: string | null;
+  fileSize: number | null;
+  error: string | null;
+  createdAt: Date;
+  completedAt: Date | null;
+  downloadUrl: string | null;
+  /** سرعت لحظه‌ای دانلود (فقط برای jobهای در حال اجرا) */
+  speed: string | null;
+  /** زمان تخمینی باقی‌مانده (فقط برای jobهای در حال اجرا) */
+  eta: string | null;
+  downloadedBytes: number | null;
+  totalBytes: number | null;
+  /** رتبه در صف (۰ یعنی در حال اجرا) */
+  queuePosition: number | null;
+}
+
+export function toPublicJob(row: Download): PublicJob {
+  const live = liveJobs.get(row.jobId);
+  const status = row.status === "done" || row.status === "error" || row.status === "expired"
+    ? row.status
+    : (live?.status ?? row.status);
+  const queued = queue.indexOf(row.jobId);
+
   return {
     jobId: row.jobId,
+    videoId: row.videoId,
     title: row.title,
     thumbnail: row.thumbnail,
     uploader: row.uploader,
     duration: row.duration,
     kind: row.kind,
     quality: row.quality,
-    status: row.status,
-    progress: row.progress,
+    status,
+    progress: status === "done" ? 100 : (live?.progress ?? row.progress),
     fileName: row.fileName,
     fileSize: row.fileSize,
     error: row.error,
     createdAt: row.createdAt,
     completedAt: row.completedAt,
-    downloadUrl: row.status === "done" ? `/api/jobs/${row.jobId}/file` : null,
+    downloadUrl: status === "done" ? `/api/jobs/${row.jobId}/file` : null,
+    speed: live?.speed ?? null,
+    eta: live?.eta ?? null,
+    downloadedBytes: live?.downloadedBytes ?? null,
+    totalBytes: live?.totalBytes ?? null,
+    queuePosition: status === "pending" && queued >= 0 ? queued + 1 : null,
   };
 }
 
-export type PublicJob = ReturnType<typeof toPublicJob>;
+/** وضعیت صف برای اندپوینت سلامت */
+export function getQueueStatus() {
+  return { active: running.size, queued: queue.length, max: MAX_CONCURRENT };
+}
+
+/** بیت‌ریت‌های مجاز صدا (برای اعتبارسنجی در API) */
+export function isAllowedAudioBitrate(value: number): boolean {
+  return (AUDIO_BITRATES as readonly number[]).includes(value);
+}
