@@ -6,6 +6,8 @@ name: Windows package
 #   (بخش Artifacts همان اجرا) قابل دانلود است.
 # - با push تگ v* (مثلاً v1.0.0) یا اجرای دستی با publish=true، فایل‌ها به
 #   GitHub Releases منتشر می‌شوند تا کاربران با یک کلیک دانلود و نصب کنند.
+# - در صورت خرابی، انتهای لاگ ساخت در Issue شماره ۲ و شاخه‌ی ci-logs ثبت می‌شود
+#   تا عیب‌یابی بدون دسترسی به لاگ Actions ممکن باشد.
 
 on:
   push:
@@ -25,6 +27,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -69,13 +72,23 @@ jobs:
         id: build
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
           New-Item -ItemType Directory -Force -Path packaging/windows/dist | Out-Null
           $log = "packaging/windows/dist/build.log"
-          & ./packaging/windows/build.ps1 -Version "${{ steps.version.outputs.value }}" -AutoInstallInno -SkipChecks *>&1 |
-            Tee-Object -FilePath $log
-          $code = $LASTEXITCODE
+          "=== build started: $(Get-Date -Format s) ===" | Set-Content -Path $log -Encoding UTF8
+          $code = 0
+          try {
+            & ./packaging/windows/build.ps1 -Version "${{ steps.version.outputs.value }}" -AutoInstallInno -SkipChecks -ErrorAction Continue *>&1 | Tee-Object -FilePath $log -Append
+            $code = $LASTEXITCODE
+          } catch {
+            $_ | Out-String | Add-Content -Path $log
+            $code = 1
+          }
           if ($null -eq $code) { $code = 0 }
+          "=== build.ps1 exit code: $code ===" | Add-Content -Path $log
           Write-Host "build.ps1 exit code: $code"
+          Write-Host "=== build log tail ==="
+          Get-Content $log -Tail 60 | Write-Host
           if ($code -ne 0) { throw "build.ps1 failed with exit code $code" }
 
       - name: Show outputs
@@ -88,7 +101,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-log
           path: packaging/windows/dist/build.log
@@ -97,7 +110,7 @@ jobs:
 
       - name: Upload installer and portable zip
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: youtube-downloader-windows-${{ steps.version.outputs.value }}
           path: |
@@ -108,21 +121,23 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      # در صورت خرابی، انتهای لاگ ساخت در Issue شماره ۲ ثبت می‌شود تا عیب‌یابی ساده باشد.
       - name: Report build failure
         if: failure()
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = "Continue"
           $log = "packaging/windows/dist/build.log"
-          if (Test-Path $log) {
-            $tail = (Get-Content $log -Tail 80) -join [Environment]::NewLine
-          } else {
-            $tail = "(build log not found)"
-          }
-          Set-Content -Path build-failure.log -Value $tail -Encoding UTF8
-          gh issue comment 2 --repo ${{ github.repository }} --body-file build-failure.log
+          New-Item -ItemType Directory -Force -Path ".ci" | Out-Null
+          if (Test-Path $log) { Copy-Item $log ".ci/build-failure.log" -Force } else { "no build log" | Set-Content ".ci/build-failure.log" }
+          "### failed run: ${{ github.run_id }} ($(Get-Date -Format s))" | Add-Content ".ci/build-failure.log"
+          gh issue comment 2 --repo ${{ github.repository }} --body-file ".ci/build-failure.log"
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git add -f ".ci/build-failure.log"
+          git commit -m "ci: build failure log for run ${{ github.run_id }}"
+          git push -f origin "HEAD:ci-logs"
 
       - name: Publish GitHub release
         if: success() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true')
@@ -139,11 +154,7 @@ jobs:
           $exists = ($LASTEXITCODE -eq 0)
           $ErrorActionPreference = $previous
           if (-not $exists) {
-            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" +
-              [Environment]::NewLine + [Environment]::NewLine +
-              "فایل Setup نصب‌کننده‌ی ویندوز است (بدون نیاز به دسترسی مدیر) و فایل Portable بدون نصب اجرا می‌شود." +
-              [Environment]::NewLine +
-              "پس از نصب، از منوی استارت «یوتیوب دانلودر» را اجرا کنید؛ مرورگر خودکار باز می‌شود."
+            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" + [Environment]::NewLine + [Environment]::NewLine + "فایل Setup نصب‌کننده‌ی ویندوز است (بدون نیاز به دسترسی مدیر) و فایل Portable بدون نصب اجرا می‌شود." + [Environment]::NewLine + "پس از نصب، از منوی استارت «یوتیوب دانلودر» را اجرا کنید؛ مرورگر خودکار باز می‌شود."
             $notes | Out-File -FilePath release-notes.md -Encoding utf8
             & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md
           }
