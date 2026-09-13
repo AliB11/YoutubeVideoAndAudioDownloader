@@ -481,6 +481,58 @@ if ($Installer) {
 }
 
 # ---------------------------------------------------------------------------
+# ۷.۵) بررسی یکپارچگی خروجی‌ها (ZIP و Setup.exe)
+# ---------------------------------------------------------------------------
+Write-Step "بررسی یکپارچگی خروجی‌ها"
+$zipCheck = "portable zip: not built"
+$setupCheck = "installer: not built"
+
+if ($Portable -and $zipPath -and (Test-Path $zipPath)) {
+    $entries = @()
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+        $archive.Dispose()
+    }
+    catch {
+        Write-Warn2 "خواندن ZIP با .NET ناموفق بود؛ از tar استفاده می‌شود."
+        $entries = @(& tar.exe -tf $zipPath)
+    }
+    $entries = $entries | ForEach-Object { "$_".Replace("\", "/") }
+
+    # فایل‌های کلیدی باید داخل ZIP باشند، وگرنه بسته‌ی قابل‌حمل بی‌فایده است
+    $required = @(
+        "YouTubeDownloader/runtime/node.exe",
+        "YouTubeDownloader/tools/yt-dlp.exe",
+        "YouTubeDownloader/tools/ffmpeg.exe",
+        "YouTubeDownloader/runner.mjs",
+        "YouTubeDownloader/Start-YouTubeDownloader.cmd",
+        "YouTubeDownloader/.next/BUILD_ID",
+        "YouTubeDownloader/node_modules/next/package.json"
+    )
+    foreach ($item in $required) {
+        if ($entries -notcontains $item) { Fail "فایل «$item» در ZIP قابل‌حمل پیدا نشد؛ بسته ناقص است." }
+    }
+    $zipCheck = "portable zip: ok ($($entries.Count) entries, $([math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MB)"
+    Write-Ok $zipCheck
+}
+
+if ($Installer -and $setup -and (Test-Path $setup)) {
+    $stream = [System.IO.File]::OpenRead($setup)
+    $head = New-Object byte[] 2
+    $null = $stream.Read($head, 0, 2)
+    $stream.Close()
+    if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) {
+        Fail "فایل نصب، اجراپذیر ویندوزی (PE/MZ) نیست؛ ساخت ناقص است."
+    }
+    $setupMb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
+    if ($setupMb -lt 30) { Fail "حجم فایل نصب ($setupMb مگابایت) غیرعادی کوچک است." }
+    $setupCheck = "setup exe: ok (PE header, $setupMb MB)"
+    Write-Ok $setupCheck
+}
+
+# ---------------------------------------------------------------------------
 # ۸) چک‌سام و انتشار (اختیاری)
 # ---------------------------------------------------------------------------
 Write-Step "محاسبه‌ی SHA256"
@@ -509,6 +561,10 @@ $reportLines = @(
     "  ffmpeg : $($toolVersions['ffmpeg'])",
     "",
     "Installed size (unpacked): $(Get-SizeMb $AppDir) MB",
+    "",
+    "Package integrity:",
+    "  $zipCheck",
+    "  $setupCheck",
     "",
     "Artifacts:"
 )

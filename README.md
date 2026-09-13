@@ -4,6 +4,8 @@
 
 [![CI](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/actions/workflows/ci.yml/badge.svg)](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/actions/workflows/ci.yml)
 
+[![Windows installer](https://img.shields.io/github/v/release/AliB11/YoutubeVideoAndAudioDownloader?label=%D9%86%D8%B5%D8%A8%20%D9%88%DB%8C%D9%86%D8%AF%D9%88%D8%B2&color=2ea44f)](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/releases/latest)
+
 ## ✨ امکانات
 
 | بخش | توضیح |
@@ -42,7 +44,8 @@ docker compose up -d --build
 ## 🪟 نصب روی ویندوز (بدون نیاز به Node.js و بدون دانش فنی)
 
 نصب‌کننده‌ی آماده‌ی ویندوز (`.exe`) در صفحه‌ی
-[Releases](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/releases) قرار می‌گیرد:
+[**آخرین نسخه (Releases)**](https://github.com/AliB11/YoutubeVideoAndAudioDownloader/releases/latest) قرار دارد
+(راهنمای کامل: [`docs/windows-installer.md`](docs/windows-installer.md)):
 
 1. فایل `YouTubeDownloader-Setup-<version>-x64.exe` را دانلود و اجرا کنید
    (نصب برای کاربر جاری است و **به دسترسی مدیر نیازی ندارد**).
