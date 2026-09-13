@@ -166,5 +166,10 @@ jobs:
             $notes | Out-File -FilePath release-notes.md -Encoding utf8
             & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md --target ${{ github.sha }}
           }
-          Get-ChildItem packaging/windows/dist -File -Include *.exe, *.zip, *.txt |
-            ForEach-Object { & gh release upload $tag $_.FullName --clobber }
+          # توجه: در PowerShell، پارامتر Include تنها با -Recurse یا وایلدکارد در مسیر کار می‌کند
+          Get-ChildItem "packaging/windows/dist/*" -File |
+            Where-Object { $_.Extension -in ".exe", ".zip", ".txt" } |
+            ForEach-Object {
+              Write-Host "uploading $($_.Name)"
+              & gh release upload $tag $_.FullName --repo ${{ github.repository }} --clobber
+            }
