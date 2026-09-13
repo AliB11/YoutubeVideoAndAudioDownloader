@@ -116,7 +116,7 @@ jobs:
           path: |
             packaging/windows/dist/*.exe
             packaging/windows/dist/*.zip
-            packaging/windows/dist/SHA256SUMS.txt
+            packaging/windows/dist/*.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -154,9 +154,17 @@ jobs:
           $exists = ($LASTEXITCODE -eq 0)
           $ErrorActionPreference = $previous
           if (-not $exists) {
-            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" + [Environment]::NewLine + [Environment]::NewLine + "فایل Setup نصب‌کننده‌ی ویندوز است (بدون نیاز به دسترسی مدیر) و فایل Portable بدون نصب اجرا می‌شود." + [Environment]::NewLine + "پس از نصب، از منوی استارت «یوتیوب دانلودر» را اجرا کنید؛ مرورگر خودکار باز می‌شود."
+            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" + [Environment]::NewLine + [Environment]::NewLine +
+              "**نصب:** فایل ``YouTubeDownloader-Setup-$version-x64.exe`` را دانلود و اجرا کنید (بدون نیاز به دسترسی مدیر و بدون هیچ پیش‌نیاز)." + [Environment]::NewLine +
+              "**بدون نصب:** فایل ``YouTubeDownloader-Portable-$version-x64.zip`` را از حالت فشرده خارج کنید و ``Start-YouTubeDownloader.cmd`` را اجرا کنید." + [Environment]::NewLine + [Environment]::NewLine +
+              "پس از اجرا، سرویس به‌صورت محلی روی ``http://127.0.0.1:3000`` بالا می‌آید و مرورگر خودکار باز می‌شود." + [Environment]::NewLine + [Environment]::NewLine +
+              "بسته شامل Node.js، yt-dlp و ffmpeg است. ویندوز ممکن است پیام «Windows protected your PC» را نشان دهد؛ روی More info و سپس Run anyway کلیک کنید." + [Environment]::NewLine + [Environment]::NewLine
+            $report = "packaging/windows/dist/BUILD-REPORT.txt"
+            if (Test-Path $report) {
+              $notes += "``````" + [Environment]::NewLine + (Get-Content $report -Raw) + "``````"
+            }
             $notes | Out-File -FilePath release-notes.md -Encoding utf8
-            & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md
+            & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md --target ${{ github.sha }}
           }
-          Get-ChildItem packaging/windows/dist -File -Include *.exe, *.zip, SHA256SUMS.txt |
+          Get-ChildItem packaging/windows/dist -File -Include *.exe, *.zip, *.txt |
             ForEach-Object { & gh release upload $tag $_.FullName --clobber }

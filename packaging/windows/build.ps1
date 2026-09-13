@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     ساخت بسته‌ی ویندوز «یوتیوب دانلودر»: نصب‌کننده‌ی EXE و نسخه‌ی قابل‌حمل ZIP.
 
@@ -305,6 +305,26 @@ if (Test-Path $ffmpegLocal) {
 }
 Write-Ok "ffmpeg.exe ($([math]::Round((Get-Item $ffmpegTarget).Length / 1MB, 1)) مگابایت)"
 
+# بررسی واقعی باینری‌ها روی ویندوز (نسخه‌ها برای گزارش ساخت نگه داشته می‌شوند)
+$toolVersions = @{}
+if ($IsWindows -or $env:OS -eq "Windows_NT") {
+    Write-Step "بررسی ابزارهای ویندوزی بسته"
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
+    $toolVersions["node"] = ((& (Join-Path $runtimeDir "node.exe") --version) 2>&1 | Select-Object -First 1)
+    $toolVersions["yt-dlp"] = ((& $ytdlpTarget --version) 2>&1 | Select-Object -First 1)
+    $ffmpegLine = (& $ffmpegTarget -version 2>&1 | Select-Object -First 1)
+    $toolVersions["ffmpeg"] = if ($ffmpegLine) { ($ffmpegLine -split " ")[2] } else { $null }
+
+    $ErrorActionPreference = $previous
+
+    foreach ($key in @("node", "yt-dlp", "ffmpeg")) {
+        if (-not $toolVersions[$key]) { Fail "ابزار «$key» در بسته اجرا نشد؛ بسته‌ی دانلودشده سالم نیست." }
+        Write-Ok "$key $($toolVersions[$key])"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # ۵) فایل‌های راه‌انداز، آیکون و راهنما
 # ---------------------------------------------------------------------------
@@ -466,13 +486,41 @@ if ($Installer) {
 Write-Step "محاسبه‌ی SHA256"
 $sumFile = Join-Path $DistDir "SHA256SUMS.txt"
 $lines = @()
+$hashes = @{}
 foreach ($artifact in $artifacts) {
     $hash = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLower()
+    $hashes[(Split-Path $artifact -Leaf)] = $hash
     $lines += "$hash  $(Split-Path $artifact -Leaf)"
     Write-Ok "$(Split-Path $artifact -Leaf): $hash"
 }
 Set-Content -Path $sumFile -Value ($lines -join "`r`n") -Encoding ASCII
+
+# گزارش ساخت (در یادداشت انتشار و به‌عنوان فایل ضمیمه استفاده می‌شود)
+$reportLines = @(
+    "YouTube Downloader - Windows package build report",
+    "Version      : $Version",
+    "Architecture : $Arch",
+    "BuiltAt      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+    "GitCommit    : $commit",
+    "",
+    "Bundled runtimes:",
+    "  node   : $($toolVersions['node'])",
+    "  yt-dlp : $($toolVersions['yt-dlp'])",
+    "  ffmpeg : $($toolVersions['ffmpeg'])",
+    "",
+    "Installed size (unpacked): $(Get-SizeMb $AppDir) MB",
+    "",
+    "Artifacts:"
+)
+foreach ($artifact in $artifacts) {
+    $name = Split-Path $artifact -Leaf
+    $reportLines += ("  {0}  ({1} MB)" -f $name, [math]::Round((Get-Item $artifact).Length / 1MB, 1))
+    if ($hashes[$name]) { $reportLines += "    sha256: $($hashes[$name])" }
+}
+$reportFile = Join-Path $DistDir "BUILD-REPORT.txt"
+Set-Content -Path $reportFile -Value ($reportLines -join "`r`n") -Encoding UTF8
 $artifacts += $sumFile
+$artifacts += $reportFile
 
 if ($Publish) {
     Write-Step "انتشار در GitHub Releases"
