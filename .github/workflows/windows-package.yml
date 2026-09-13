@@ -6,8 +6,8 @@ name: Windows package
 #   (بخش Artifacts همان اجرا) قابل دانلود است.
 # - با push تگ v* (مثلاً v1.0.0) یا اجرای دستی با publish=true، فایل‌ها به
 #   GitHub Releases منتشر می‌شوند تا کاربران با یک کلیک دانلود و نصب کنند.
-# - در صورت خرابی، لاگ کامل ساخت در شاخه‌ی ci-logs قرار می‌گیرد تا بدون دسترسی
-#   به لاگ Actions هم قابل بررسی باشد.
+# - در صورت خرابی، لاگ ساخت در شاخه‌ی ci-logs قرار می‌گیرد تا بدون دسترسی به
+#   لاگ Actions هم قابل بررسی باشد.
 
 on:
   push:
@@ -123,18 +123,14 @@ jobs:
       - name: Report build failure
         if: failure()
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Continue"
           $log = "packaging/windows/dist/build.log"
           New-Item -ItemType Directory -Force -Path ".ci" | Out-Null
           if (Test-Path $log) { Copy-Item $log ".ci/build-failure.log" -Force } else { "no build log" | Set-Content ".ci/build-failure.log" }
           "### failed run: ${{ github.run_id }} ($(Get-Date -Format s))" | Add-Content ".ci/build-failure.log"
-          # خلاصه‌ی خطا در صفحه‌ی اجرا
           "## ساخت بسته ناموفق بود" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           Get-Content ".ci/build-failure.log" -Tail 40 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          # انتشار لاگ در شاخه‌ی ci-logs برای بررسی بدون دسترسی به لاگ Actions
           git config user.email "actions@github.com"
           git config user.name "github-actions[bot]"
           git add -f ".ci/build-failure.log"
@@ -147,36 +143,47 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = "Continue"
           $tag = "v${{ steps.version.outputs.value }}"
           $version = "${{ steps.version.outputs.value }}"
+          $repo = "${{ github.repository }}"
+          $nl = [Environment]::NewLine
+          $fence = [string][char]0x60 * 3
           Write-Host "Publishing $tag"
-          $previous = $ErrorActionPreference
-          $ErrorActionPreference = "Continue"
-          & gh release view $tag | Out-Null
-          $exists = ($LASTEXITCODE -eq 0)
-          $ErrorActionPreference = $previous
-          if (-not $exists) {
-            $notes = "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version" + [Environment]::NewLine + [Environment]::NewLine +
-              "**نصب:** فایل ``YouTubeDownloader-Setup-$version-x64.exe`` را دانلود و اجرا کنید (بدون نیاز به دسترسی مدیر و بدون هیچ پیش‌نیاز)." + [Environment]::NewLine +
-              "**بدون نصب:** فایل ``YouTubeDownloader-Portable-$version-x64.zip`` را از حالت فشرده خارج کنید و ``Start-YouTubeDownloader.cmd`` را اجرا کنید." + [Environment]::NewLine + [Environment]::NewLine +
-              "پس از اجرا، سرویس به‌صورت محلی روی ``http://127.0.0.1:3000`` بالا می‌آید و مرورگر خودکار باز می‌شود." + [Environment]::NewLine + [Environment]::NewLine +
-              "بسته شامل Node.js، yt-dlp و ffmpeg است. ویندوز ممکن است پیام «Windows protected your PC» را نشان دهد؛ روی More info و سپس Run anyway کلیک کنید." + [Environment]::NewLine + [Environment]::NewLine
-            $report = "packaging/windows/dist/BUILD-REPORT.txt"
-            if (Test-Path $report) {
-              $notes += "``````" + [Environment]::NewLine + (Get-Content $report -Raw) + "``````"
-            }
-            $notes | Out-File -FilePath release-notes.md -Encoding utf8
-            & gh release create $tag --title "یوتیوب دانلودر $version" --notes-file release-notes.md --target ${{ github.sha }}
+
+          # یادداشت‌های انتشار از گزارش ساخت همین اجرا ساخته می‌شود تا چک‌سام‌های
+          # ذکرشده دقیقاً با فایل‌های ضمیمه‌شده مطابقت داشته باشند.
+          $notes = @()
+          $notes += "بسته‌ی ویندوز «یوتیوب دانلودر» نسخه $version"
+          $notes += ""
+          $notes += "**نصب:** فایل ``YouTubeDownloader-Setup-$version-x64.exe`` را دانلود و اجرا کنید — بدون نیاز به دسترسی مدیر و بدون هیچ پیش‌نیاز."
+          $notes += "**بدون نصب:** فایل ``YouTubeDownloader-Portable-$version-x64.zip`` را از حالت فشرده خارج کنید و ``Start-YouTubeDownloader.cmd`` را اجرا کنید."
+          $notes += ""
+          $notes += "پس از اجرا، سرویس به‌صورت محلی روی ``http://127.0.0.1:3000`` بالا می‌آید و مرورگر خودکار باز می‌شود؛ برای بستن، پنجره‌ی سرویس را ببندید."
+          $notes += ""
+          $notes += "بسته شامل Node.js، yt-dlp و ffmpeg است. ویندوز ممکن است پیام «Windows protected your PC» را نشان دهد؛ روی More info و سپس Run anyway کلیک کنید."
+          $notes += ""
+          $report = "packaging/windows/dist/BUILD-REPORT.txt"
+          if (Test-Path $report) {
+            $notes += "**گزارش ساخت** (نسخه‌های تأییدشده روی ویندوز و چک‌سام فایل‌ها):"
+            $notes += ""
+            $notes += $fence
+            $notes += (Get-Content $report)
+            $notes += $fence
           }
-          # توجه: در PowerShell، پارامتر Include تنها با -Recurse یا وایلدکارد در مسیر کار می‌کند
+          $notes -join $nl | Out-File -FilePath release-notes.md -Encoding utf8
+
+          & gh release view $tag --repo $repo | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release exists -> updating notes"
+            & gh release edit $tag --repo $repo --notes-file release-notes.md
+          } else {
+            & gh release create $tag --repo $repo --title "یوتیوب دانلودر $version" --notes-file release-notes.md --target ${{ github.sha }}
+          }
+
           Get-ChildItem "packaging/windows/dist/*" -File |
             Where-Object { $_.Extension -in ".exe", ".zip", ".txt" } |
             ForEach-Object {
               Write-Host "uploading $($_.Name)"
-              & gh release upload $tag $_.FullName --repo ${{ github.repository }} --clobber
+              & gh release upload $tag $_.FullName --repo $repo --clobber
             }
-          # یادداشت‌های انتشار در هر اجرا از گزارش ساخت همین اجرا به‌روز می‌شود
-          # تا چک‌سام‌های ذکرشده با فایل‌های ضمیمه مطابقت داشته باشند
-          if (Test-Path "release-notes.md") {
-            & gh release edit $tag --repo ${{ github.repository }} --notes-file release-notes.md
-          }
