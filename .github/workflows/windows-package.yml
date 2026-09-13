@@ -66,15 +66,50 @@ jobs:
           Write-Host "Package version: $version"
 
       - name: Build packages (portable + installer)
+        id: build
         shell: pwsh
         run: |
-          ./packaging/windows/build.ps1 -Version "${{ steps.version.outputs.value }}" -AutoInstallInno -SkipChecks
+          New-Item -ItemType Directory -Force -Path packaging/windows/dist | Out-Null
+          $log = "packaging/windows/dist/build.log"
+          & ./packaging/windows/build.ps1 -Version "${{ steps.version.outputs.value }}" -AutoInstallInno -SkipChecks *>&1 |
+            Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($null -eq $code) { $code = 0 }
+          if ($code -ne 0) { throw "build.ps1 با کد $code ناموفق بود" }
+
+      - name: Report build failure
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = "packaging/windows/dist/build.log"
+          $tail = if (Test-Path $log) { (Get-Content $log -Tail 80) -join "`n" } else { "(لاگ ساخت پیدا نشد)" }
+          $body = @"
+### ❌ ساخت بسته‌ی ویندوز ناموفق بود
+
+``````
+$tail
+``````
+"@
+          Set-Content -Path build-failure.md -Value $body -Encoding UTF8
+          gh issue comment 2 --repo ${{ github.repository }} --body-file build-failure.md
 
       - name: Show outputs
         shell: pwsh
         run: Get-ChildItem packaging/windows/dist -File | Select-Object Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table -AutoSize
 
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: packaging/windows/dist/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: youtube-downloader-windows-${{ steps.version.outputs.value }}

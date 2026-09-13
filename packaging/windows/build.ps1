@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     ساخت بسته‌ی ویندوز «یوتیوب دانلودر»: نصب‌کننده‌ی EXE و نسخه‌ی قابل‌حمل ZIP.
 
@@ -42,6 +42,16 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# گزارش کامل در صورت بروز خطای پیش‌بینی‌نشده (برای عیب‌یابی در CI و اجرای محلی)
+trap {
+    Write-Host "`n[x] خطای غیرمنتظره در ساخت بسته" -ForegroundColor Red
+    Write-Host "    نوع: $($_.Exception.GetType().FullName)" -ForegroundColor Red
+    Write-Host "    پیام: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "    محل: $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkYellow
+    Write-Host "    مسیر فراخوانی:`n$($_.ScriptStackTrace)" -ForegroundColor DarkGray
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # مسیرها و توابع کمکی
